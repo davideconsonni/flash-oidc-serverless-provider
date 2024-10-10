@@ -1,6 +1,6 @@
-# OIDC Serverless Provider Flash
+# Flash OIDC Serverless Provider
 
-**OIDC Serverless Provider Flash** is a lightweight and scalable OpenID Connect (OIDC) Provider built with a serverless architecture, leveraging Google Cloud's Datastore for efficient data management. This project is designed to offer a secure and flexible identity provider solution, ideal for modern cloud-native applications.
+**Flash OIDC Serverless Provider** is a lightweight and scalable OpenID Connect (OIDC) Provider built with a serverless architecture, leveraging Google Cloud's Datastore for efficient data management. This project is designed to offer a secure and flexible identity provider solution, ideal for modern cloud-native applications.
 
 ## Key Features:
 - **Serverless Architecture**: Fully serverless, ensuring high scalability and low operational overhead.
