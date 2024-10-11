@@ -25,3 +25,7 @@ Feel free to contribute by opening issues or submitting pull requests. We welcom
 ---
 
 This description highlights the project's key features, use cases, and ease of deployment. You can modify it further if you have specific details you'd like to add.
+
+
+python -m pytest test_main.py -v
+python -m unittest test_main.py -v
