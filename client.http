@@ -18,9 +18,10 @@ Content-Type: application/x-www-form-urlencoded
 
 grant_type=password&username={{username}}&password={{password}}&client_id={{client_id}}&client_secret={{client_secret}}
 
-### Extract tokens from login response
-@access_token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhIiwiZXhwIjoxNzI4Njg1MjIzfQ.4d87TEXdlrT2HgWplKHI6GJWY0JaitBkr5_WmUU9lhc
-@refresh_token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhIiwidHlwZSI6InJlZnJlc2giLCJleHAiOjE3MzEyNzU0MjN9.m6qXPSI0G3mhZ2fH-ijSW_8Efhy2sCby-YuVeC8rXY0
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+  %}
 
 ### Get User Info
 GET {{baseUrl}}/userinfo
@@ -33,6 +34,11 @@ Content-Type: application/json
 {
   "refresh_token": "{{refresh_token}}"
 }
+
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+%}
 
 ### Invalid Refresh Token (for testing error handling)
 POST {{baseUrl}}/refresh
