@@ -11,6 +11,23 @@ GET {{baseUrl}}/.well-known/openid-configuration
 ### JWKS
 GET {{baseUrl}}/jwks.json
 
+
+### Client Registration
+# @name register
+POST {{baseUrl}}/register
+Content-Type: application/json
+
+{
+  "client_id": "{{client_id}}",
+  "client_secret": "{{client_secret}}"
+}
+
+> {%
+    client.global.set("client_id", "{{client_id}}");
+    client.global.set("client_secret", "{{client_secret}}");
+%}
+
+
 ### Login to get tokens
 # @name login
 POST {{baseUrl}}/token

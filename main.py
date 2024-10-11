@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from google.cloud import datastore
 from jose import JWTError, jwt
@@ -10,6 +10,8 @@ from passlib.context import CryptContext
 import secrets
 import logging
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import base64
 
 # Configurazione
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
@@ -22,6 +24,8 @@ NAMESPACE = "openid_users"
 
 # Initialize Datastore client with the custom namespace
 datastore_client = datastore.Client(namespace=NAMESPACE)
+
+security = HTTPBasic()
 
 # Inizializzazione FastAPI
 app = FastAPI(title="OpenID Connect Provider")
@@ -127,6 +131,28 @@ def create_refresh_token(username: str) -> str:
 
     return refresh_token
 
+def store_client(client_id: str, client_secret: str):
+    # Hash the client_secret before storing
+    hashed_client_secret = get_password_hash(client_secret)
+
+    entity = datastore.Entity(key=datastore_client.key("Client", client_id))
+    entity.update({
+        "client_id": client_id,
+        "hashed_client_secret": hashed_client_secret,
+    })
+    datastore_client.put(entity)
+
+def verify_client(client_id: str, client_secret: str) -> bool:
+    # Fetch client details from Datastore
+    client_key = datastore_client.key("Client", client_id)
+    client_data = datastore_client.get(client_key)
+
+    if not client_data:
+        return False
+
+    # Verify the provided client_secret
+    return verify_password(client_secret, client_data["hashed_client_secret"])
+
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -149,6 +175,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 # Endpoints
 @app.post("/token")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    # Verifica le credenziali del client
+    if not verify_client(form_data.client_id, form_data.client_secret):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid client credentials",
+        )
+
+    # Autentica l'utente
     user = authenticate_user(form_data.username, form_data.password)
     if not user:
         raise HTTPException(
@@ -157,16 +191,13 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Compute expiration time for access token
+    # Generate tokens as usual
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
 
-    # Generate refresh token
     refresh_token = create_refresh_token(user.username)
-
-    # Calculate token expiration times in seconds
     access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
     return {
@@ -176,6 +207,19 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         "expires": access_token_expires_in_seconds,
     }
 
+
+@app.post("/register")
+async def register_client(data: dict = Body(...)):
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=400, detail="client_id and client_secret are required")
+
+    # Store the client credentials securely
+    store_client(client_id, client_secret)
+
+    return {"client_id": client_id}
 
 
 @app.post("/refresh")
