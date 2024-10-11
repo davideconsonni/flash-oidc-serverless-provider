@@ -156,17 +156,27 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Compute expiration time for access token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
+
+    # Generate refresh token
     refresh_token = create_refresh_token(user.username)
+
+    # Calculate token expiration times in seconds
+    access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
     return {
         "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
-        "refresh_token": refresh_token
+        "expires": access_token_expires_in_seconds,
     }
+
+
 
 @app.post("/refresh")
 async def refresh_token(refresh_token: dict):
@@ -207,10 +217,14 @@ async def refresh_token(refresh_token: dict):
         # Elimina il vecchio refresh token
         datastore_client.delete(results[0].key)
 
+        # Calculate token expiration times in seconds
+        access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
         return {
             "access_token": new_access_token,
+            "refresh_token": new_refresh_token,
             "token_type": "bearer",
-            "refresh_token": new_refresh_token
+            "expires": access_token_expires_in_seconds,
         }
 
     except JWTError:
@@ -218,6 +232,7 @@ async def refresh_token(refresh_token: dict):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
+
 
 
 @app.get("/userinfo")
