@@ -1,17 +1,16 @@
+import logging
 import os
+import secrets
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from google.cloud import datastore
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-import secrets
-import logging
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-import base64
 
 # Configurazione
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
@@ -172,23 +171,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         raise credentials_exception
     return user
 
-def clean_expired_refresh_tokens():
-    client = datastore.Client(namespace=NAMESPACE)
-
-    # Query per trovare i token scaduti
-    query = client.query(kind="RefreshToken")
-    query.add_filter("expires", "<", datetime.utcnow())
-
-    # Esegui la query e ottieni le chiavi dei token scaduti
-    expired_token_keys = [entity.key for entity in query.fetch()]
-
-    # Elimina i token scaduti in batch
-    if expired_token_keys:
-        client.delete_multi(expired_token_keys)
-        print(f"Deleted {len(expired_token_keys)} expired refresh tokens")
-    else:
-        print("No expired refresh tokens found")
-
 # Endpoints
 @app.post("/token")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -342,6 +324,5 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import uvicorn
-    # clean_expired_refresh_tokens()
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
