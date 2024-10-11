@@ -172,6 +172,23 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         raise credentials_exception
     return user
 
+def clean_expired_refresh_tokens():
+    client = datastore.Client(namespace=NAMESPACE)
+
+    # Query per trovare i token scaduti
+    query = client.query(kind="RefreshToken")
+    query.add_filter("expires", "<", datetime.utcnow())
+
+    # Esegui la query e ottieni le chiavi dei token scaduti
+    expired_token_keys = [entity.key for entity in query.fetch()]
+
+    # Elimina i token scaduti in batch
+    if expired_token_keys:
+        client.delete_multi(expired_token_keys)
+        print(f"Deleted {len(expired_token_keys)} expired refresh tokens")
+    else:
+        print("No expired refresh tokens found")
+
 # Endpoints
 @app.post("/token")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -325,5 +342,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import uvicorn
+    # clean_expired_refresh_tokens()
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)
