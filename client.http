@@ -8,8 +8,10 @@
 ### OpenID Configuration
 GET {{baseUrl}}/.well-known/openid-configuration
 
+
 ### JWKS
 GET {{baseUrl}}/jwks.json
+
 
 ### Client Registration
 # @name register
@@ -26,6 +28,7 @@ Content-Type: application/json
     client.global.set("client_secret", "{{client_secret}}");
 %}
 
+
 ### Login to get tokens (with all scopes)
 POST {{baseUrl}}/token
 Content-Type: application/x-www-form-urlencoded
@@ -37,6 +40,7 @@ grant_type=password&username={{username}}&password={{password}}&client_id={{clie
     client.global.set("refresh_token", response.body.refresh_token);
     client.global.set("id_token", response.body.id_token);
 %}
+
 
 ### Get User Info (all scopes)
 GET {{baseUrl}}/userinfo
@@ -56,8 +60,10 @@ Content-Type: application/json
     client.global.set("refresh_token", response.body.refresh_token);
 %}
 
+
 ### Authorize Endpoint (simulate redirect to login page)
 GET {{baseUrl}}/authorize?response_type=code&client_id={{client_id}}&redirect_uri=https://example.com/callback&scope=openid profile email&state=random_state&nonce=random_nonce
+
 
 ### Simulate Token Request after Authorization Code (you need to replace {auth_code} with a valid code)
 POST {{baseUrl}}/token

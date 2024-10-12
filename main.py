@@ -16,8 +16,13 @@ from google.cloud import datastore
 from google.cloud import storage
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel, constr, EmailStr
+from pydantic import BaseModel, constr, EmailStr, Field
 from starlette.templating import Jinja2Templates
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from fastapi.responses import JSONResponse
 
 # Configurazione
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "busysummer44-flash-oidc-serverless-provider")
@@ -31,6 +36,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 1))
 ID_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ID_TOKEN_EXPIRE_MINUTES", 60))
 ISSUER = os.environ.get("ISSUER", "https://flash-oidc-serverless-provider.com")
+BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8080")
 
 # Custom namespace for OpenID users
 NAMESPACE = os.environ.get("NAMESPACE", "openid_users")
@@ -46,7 +52,26 @@ bucket = storage_client.bucket(BUCKET_NAME)
 
 
 # Inizializzazione FastAPI
-app = FastAPI(title="OpenID Connect Provider")
+def get_remote_address(request: Request):
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0]
+    return request.client.host
+
+limiter = Limiter(key_func=get_remote_address)
+app = FastAPI(
+    title="OpenID Connect Provider API",
+    description="API per la gestione dell'autenticazione e autorizzazione OpenID Connect",
+    version="1.0.0",
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    servers=[
+        {"url": BASE_URL, "description": "Current server"},
+    ]
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Initialize Jinja2 templates
 templates = Jinja2Templates(directory="templates")
@@ -68,47 +93,54 @@ logger = logging.getLogger(__name__)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # OAuth2 scheme
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="token",
+    scopes={
+        "openid": "OpenID scope",
+        "profile": "Access to user profile information",
+        "email": "Access to user email"
+    }
+)
 
 # --- Modelli Pydantic per la validazione ---
 class User(BaseModel):
-    username: constr(min_length=3, max_length=20)
-    email: EmailStr
-    full_name: Optional[str] = None
-    disabled: Optional[bool] = False
+    username: constr(min_length=3, max_length=20) = Field(..., description="User's unique username")
+    email: EmailStr = Field(..., description="User's email address")
+    full_name: Optional[str] = Field(None, description="User's full name")
+    disabled: Optional[bool] = Field(False, description="Whether the user account is disabled")
 
 class UserInDB(User):
-    hashed_password: str
+    hashed_password: str = Field(..., description="Hashed password of the user")
 
 class Token(BaseModel):
-    access_token: str
-    token_type: str
-    refresh_token: str
+    access_token: str = Field(..., description="The access token for API requests")
+    token_type: str = Field(..., description="The type of token, typically 'bearer'")
+    refresh_token: str = Field(..., description="Token used to obtain a new access token")
 
 class TokenData(BaseModel):
-    username: Optional[str] = None
+    username: Optional[str] = Field(None, description="Username extracted from the token")
 
 class RefreshToken(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(..., description="The refresh token to exchange for a new access token")
 
 class ClientRegistrationData(BaseModel):
-    client_id: str
-    client_secret: str
+    client_id: str = Field(..., description="The client's unique identifier")
+    client_secret: str = Field(..., description="The client's secret")
 
 class AuthorizationRequest(BaseModel):
-    response_type: str
-    client_id: str
-    redirect_uri: str
-    scope: str
-    state: str
+    response_type: str = Field(..., description="The desired response type ('code', 'id_token', or 'id_token token')")
+    client_id: str = Field(..., description="The client's unique identifier")
+    redirect_uri: str = Field(..., description="The URI to redirect to after authorization")
+    scope: str = Field(..., description="The requested scopes, space-separated")
+    state: str = Field(..., description="A value used to maintain state between the request and callback")
 
 
 class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    refresh_token: str
-    expires_in: int
-    id_token: str
+    access_token: str = Field(..., description="The access token for API requests")
+    token_type: str = Field(..., description="The type of token, typically 'bearer'")
+    refresh_token: str = Field(..., description="Token used to obtain a new access token")
+    expires_in: int = Field(..., description="Number of seconds until the access token expires")
+    id_token: str = Field(..., description="OpenID Connect ID Token")
 
 # --- Fine Modelli Pydantic ---
 
@@ -156,6 +188,8 @@ def get_keys_from_storage():
     except Exception as e:
         print(f"Errore nel recupero delle chiavi: {e}")
         return None, None
+
+
 
 def create_auth_token(user_id: str) -> str:
     auth_token = secrets.token_urlsafe(32)
@@ -335,8 +369,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
 
 # Endpoints
-@app.post("/token", response_model=TokenResponse)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+@app.post("/token", response_model=TokenResponse, tags=["Authentication"])
+@limiter.limit("200/minute")
+async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    OAuth2 compatible token login, get an access token for future requests.
+
+    - **grant_type**: Must be "password" for username/password authentication or "authorization_code" for OAuth2 flow
+    - **username**: The user's username (only for password grant type)
+    - **password**: The user's password (only for password grant type)
+    - **scope**: The requested scopes, space-separated
+    - **client_id**: The client's ID
+    - **client_secret**: The client's secret
+    - **code**: The authorization code (only for authorization_code grant type)
+
+    Returns a token response containing access_token, refresh_token, and id_token.
+    """
     # Verifica le credenziali del client
     if not verify_client(form_data.client_id, form_data.client_secret):
         raise HTTPException(
@@ -408,7 +456,16 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
 
 @app.post("/register")
-async def register_client(client_data: ClientRegistrationData = Body(...)):
+@limiter.limit("200/minute")
+async def register_client(request: Request, client_data: ClientRegistrationData = Body(...)):
+    """
+    Register a new OAuth2 client.
+
+    - **client_id**: The client's unique identifier
+    - **client_secret**: The client's secret
+
+    Returns the registered client_id.
+    """
     # La validazione dei dati è già gestita da Pydantic grazie al modello 'ClientRegistrationData'
 
     # Store the client credentials securely
@@ -417,8 +474,16 @@ async def register_client(client_data: ClientRegistrationData = Body(...)):
     return {"client_id": client_data.client_id}
 
 
-@app.post("/refresh")
-async def refresh_token(refresh_token_data: RefreshToken = Body(...)):
+@app.post("/refresh", tags=["Authentication"])
+@limiter.limit("200/minute")
+async def refresh_token(request: Request, refresh_token_data: RefreshToken = Body(...)):
+    """
+    Use a refresh token to obtain a new access token.
+
+    - **refresh_token**: The refresh token obtained during the initial token request
+
+    Returns a new set of tokens including a fresh access_token.
+    """
     try:
         payload = jwt.decode(refresh_token_data.refresh_token, public_key, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
@@ -474,8 +539,14 @@ async def refresh_token(refresh_token_data: RefreshToken = Body(...)):
 
 
 
-@app.get("/userinfo")
-async def read_users_me(current_user: User = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
+@app.get("/userinfo", tags=["Authentication"])
+@limiter.limit("200/minute")
+async def read_users_me(request: Request, current_user: User = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
+    """
+    Get information about the currently authenticated user.
+
+    This endpoint requires a valid access token and returns user information based on the granted scopes.
+    """
     try:
         payload = jwt.decode(token, public_key, algorithms=[ALGORITHM])
         scopes = set(payload.get("scope", "").split())
@@ -494,8 +565,14 @@ async def read_users_me(current_user: User = Depends(get_current_user), token: s
 
     return user_info
 
-@app.get("/.well-known/openid-configuration")
+@app.get("/.well-known/openid-configuration", tags=["Authentication"])
+@limiter.limit("200/minute")
 async def openid_configuration(request: Request):
+    """
+    Retrieve the OpenID Connect configuration information.
+
+    This endpoint provides the necessary information for clients to interact with the OpenID Connect provider.
+    """
     base_url = str(request.base_url).rstrip('/')
     return {
         "issuer": ISSUER,
@@ -511,8 +588,14 @@ async def openid_configuration(request: Request):
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "email"]
     }
 
-@app.get("/jwks.json")
-async def jwks():
+@app.get("/jwks.json", tags=["Authentication"])
+@limiter.limit("200/minute")
+async def jwks(request: Request):
+    """
+    Retrieve the JSON Web Key Set (JWKS) used for token verification.
+
+    This endpoint provides the public keys used to verify the signatures of issued tokens.
+    """
     jwk = {
         "kty": "RSA",
         "use": "sig",
@@ -523,7 +606,8 @@ async def jwks():
     }
     return {"keys": [jwk]}
 
-@app.get("/authorize")
+@app.get("/authorize", tags=["Authentication"])
+@limiter.limit("200/minute")
 async def authorize(
         request: Request,
         response_type: str,
@@ -534,6 +618,19 @@ async def authorize(
         nonce: Optional[str] = None,
         auth_token: Optional[str] = None
 ):
+    """
+    Initiate the OAuth2 authorization flow.
+
+    - **response_type**: The desired grant type ("code", "id_token", or "id_token token")
+    - **client_id**: The client's ID
+    - **redirect_uri**: The URI to redirect to after authorization
+    - **scope**: The requested scopes, space-separated
+    - **state**: A value used to maintain state between the request and callback
+    - **nonce**: Optional nonce for ID Token requests
+    - **auth_token**: Optional authentication token for already authenticated users
+
+    This endpoint will either redirect to the login page or directly to the client with an authorization response.
+    """
     # Valida la richiesta di autorizzazione
     if response_type not in ["code", "id_token", "id_token token"]:
         raise HTTPException(status_code=400, detail="Invalid response_type")
@@ -595,16 +692,32 @@ async def authorize(
     return RedirectResponse(redirect_uri)
 
 @app.get("/login", response_class=HTMLResponse)
+@limiter.limit("200/minute")
 async def login(request: Request):
+    """
+    Display the login page.
+
+    This endpoint returns an HTML page with a login form for user authentication.
+    """
     return templates.TemplateResponse("login.html", {"request": request, "next": request.query_params.get("next")})
 
-@app.post("/login")
+@app.post("/login", tags=["Authentication"])
+@limiter.limit("200/minute")
 async def login_submit(
         request: Request,
         username: str = Form(...),
         password: str = Form(...),
         next: str = Form(None)
 ):
+    """
+    Process the login form submission.
+
+    - **username**: The user's username
+    - **password**: The user's password
+    - **next**: Optional URL to redirect to after successful login
+
+    This endpoint authenticates the user and redirects to the appropriate page.
+    """
     user = authenticate_user(username, password)
     if not user:
         return templates.TemplateResponse(
@@ -618,6 +731,48 @@ async def login_submit(
         return RedirectResponse(f"{next}&auth_token={auth_token}", status_code=303)
     return RedirectResponse(f"/?auth_token={auth_token}", status_code=303)
 
+@app.get("/health")
+@limiter.limit("200/minute")
+async def health_check(request: Request):
+    """
+    Perform a health check on the service.
+
+    This endpoint verifies that the service is running and can respond to requests.
+    It may also include additional checks for dependent services or resources.
+    """
+    try:
+        # Qui puoi aggiungere controlli più approfonditi se necessario
+        # Ad esempio, verifica la connessione al database, ecc.
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"status": "healthy", "message": "Service is running"}
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "unhealthy", "message": str(e)}
+        )
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """
+    Root endpoint of the OpenID Connect Provider.
+
+    This endpoint returns a simple HTML page with information about the service.
+    """
+    return """
+    <html>
+        <head>
+            <title>OpenID Connect Provider</title>
+        </head>
+        <body>
+            <h1>Welcome to the OpenID Connect Provider</h1>
+            <p>This is the root endpoint of the OpenID Connect Provider API.</p>
+            <p>For more information, please refer to the API documentation.</p>
+        </body>
+    </html>
+    """
+
 # Gestione errori
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
@@ -627,6 +782,12 @@ async def generic_exception_handler(request: Request, exc: Exception):
         content="An internal server error occurred."
     )
 
+@app.exception_handler(RateLimitExceeded)
+async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"detail": "Rate limit exceeded. Please try again later."}
+    )
 
 # ---  Inizializzazione delle chiavi ---
 private_key, public_key = get_keys_from_storage()

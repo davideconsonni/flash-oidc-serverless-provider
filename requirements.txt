@@ -9,3 +9,5 @@ jinja2
 itsdangerous
 apscheduler
 google-cloud-storage
+slowapi
+
