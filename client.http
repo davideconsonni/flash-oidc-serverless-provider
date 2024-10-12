@@ -11,7 +11,6 @@ GET {{baseUrl}}/.well-known/openid-configuration
 ### JWKS
 GET {{baseUrl}}/jwks.json
 
-
 ### Client Registration
 # @name register
 POST {{baseUrl}}/register
@@ -27,24 +26,24 @@ Content-Type: application/json
     client.global.set("client_secret", "{{client_secret}}");
 %}
 
-
-### Login to get tokens
-# @name login
+### Login to get tokens (with all scopes)
 POST {{baseUrl}}/token
 Content-Type: application/x-www-form-urlencoded
 
-grant_type=password&username={{username}}&password={{password}}&client_id={{client_id}}&client_secret={{client_secret}}
+grant_type=password&username={{username}}&password={{password}}&client_id={{client_id}}&client_secret={{client_secret}}&scope=openid profile email
 
 > {%
     client.global.set("access_token", response.body.access_token);
     client.global.set("refresh_token", response.body.refresh_token);
-  %}
+    client.global.set("id_token", response.body.id_token);
+%}
 
-### Get User Info
+### Get User Info (all scopes)
 GET {{baseUrl}}/userinfo
 Authorization: Bearer {{access_token}}
 
-### Refresh Token
+
+### Refresh Token (all scopes)
 POST {{baseUrl}}/refresh
 Content-Type: application/json
 
@@ -57,10 +56,12 @@ Content-Type: application/json
     client.global.set("refresh_token", response.body.refresh_token);
 %}
 
-### Invalid Refresh Token (for testing error handling)
-POST {{baseUrl}}/refresh
-Content-Type: application/json
+### Authorize Endpoint (simulate redirect to login page)
+GET {{baseUrl}}/authorize?response_type=code&client_id={{client_id}}&redirect_uri=https://example.com/callback&scope=openid profile email&state=random_state&nonce=random_nonce
 
-{
-  "refresh_token": "invalid_refresh_token"
-}
+### Simulate Token Request after Authorization Code (you need to replace {auth_code} with a valid code)
+POST {{baseUrl}}/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code&code={auth_code}&client_id={{client_id}}&client_secret={{client_secret}}&redirect_uri=https://example.com/callback
+

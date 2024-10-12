@@ -20,6 +20,7 @@ import base64
 
 # Configurazione
 ALGORITHM = "RS256"
+SUPPORTED_SCOPES = {"openid", "profile", "email"}
 
 private_key = rsa.generate_private_key(
     public_exponent=65537,
@@ -146,7 +147,7 @@ def verify_auth_token(auth_token: str) -> Optional[str]:
 
     return token_entity["user_id"]
 
-def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None, auth_time: Optional[float] = None) -> str:
+def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional[str] = None, auth_time: Optional[float] = None) -> str:
     now = datetime.utcnow()
     expires = now + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
 
@@ -162,10 +163,13 @@ def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None,
     if nonce:
         payload["nonce"] = nonce
 
-    if user.email:
+    if "email" in scopes and user.email:
         payload["email"] = user.email
-    if user.full_name:
-        payload["name"] = user.full_name
+
+    if "profile" in scopes:
+        if user.full_name:
+            payload["name"] = user.full_name
+        # Aggiungi altri campi del profilo se disponibili
 
     # Converti la chiave privata in formato PEM
     pem = private_key.private_bytes(
@@ -317,6 +321,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         user = get_user(auth_code["user_id"])
         nonce = auth_code.get("nonce")
         auth_time = auth_code.get("auth_time")
+        scopes = set(auth_code.get("scope", "openid").split())
 
         # Elimina il codice di autorizzazione utilizzato
         datastore_client.delete(results[0].key)
@@ -325,6 +330,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         user = authenticate_user(form_data.username, form_data.password)
         nonce = None
         auth_time = datetime.utcnow().timestamp()
+        scopes = set(form_data.scopes) if form_data.scopes else {"openid"}
 
     if not user:
         raise HTTPException(
@@ -333,17 +339,23 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Filtra gli scope validi
+    valid_scopes = scopes.intersection(SUPPORTED_SCOPES)
+    if "openid" not in valid_scopes:
+        valid_scopes.add("openid")
+
     # Genera i token come al solito
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.username, "scope": " ".join(valid_scopes)},
+        expires_delta=access_token_expires
     )
 
     refresh_token = create_refresh_token(user.username)
     access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
     # Genera l'ID Token
-    id_token = create_id_token(user, form_data.client_id, nonce, auth_time)
+    id_token = create_id_token(user, form_data.client_id, valid_scopes, nonce, auth_time)
 
     return {
         "access_token": access_token,
@@ -422,8 +434,24 @@ async def refresh_token(refresh_token_data: RefreshToken = Body(...)):
 
 
 @app.get("/userinfo")
-async def read_users_me(current_user: User = Depends(get_current_user)):
-    return current_user.__dict__
+async def read_users_me(current_user: User = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, public_key, algorithms=[ALGORITHM])
+        scopes = set(payload.get("scope", "").split())
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_info = {"sub": current_user.username}
+
+    if "email" in scopes:
+        user_info["email"] = current_user.email
+
+    if "profile" in scopes:
+        if current_user.full_name:
+            user_info["name"] = current_user.full_name
+        # Aggiungi altri campi del profilo se disponibili
+
+    return user_info
 
 @app.get("/.well-known/openid-configuration")
 async def openid_configuration(request: Request):
@@ -437,7 +465,7 @@ async def openid_configuration(request: Request):
         "response_types_supported": ["code", "id_token", "id_token token"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": [ALGORITHM],
-        "scopes_supported": ["openid", "profile", "email"],
+        "scopes_supported": list(SUPPORTED_SCOPES),
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "email"]
     }
@@ -483,6 +511,12 @@ async def authorize(
 
     user = get_user(user_id)
 
+    # Valida e filtra gli scope
+    requested_scopes = set(scope.split())
+    valid_scopes = requested_scopes.intersection(SUPPORTED_SCOPES)
+    if "openid" not in valid_scopes:
+        raise HTTPException(status_code=400, detail="OpenID scope is required")
+
     # Genera il codice di autorizzazione
     auth_code = secrets.token_urlsafe(32)
 
@@ -492,7 +526,7 @@ async def authorize(
         "code": auth_code,
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-        "scope": scope,
+        "scope": " ".join(valid_scopes),
         "user_id": user_id,
         "nonce": nonce,
         "auth_time": datetime.utcnow().timestamp(),
@@ -506,11 +540,11 @@ async def authorize(
     if response_type == "code":
         response_params["code"] = auth_code
     elif response_type in ["id_token", "id_token token"]:
-        id_token = create_id_token(user, client_id, nonce)
+        id_token = create_id_token(user, client_id, valid_scopes, nonce)
         response_params["id_token"] = id_token
 
         if response_type == "id_token token":
-            access_token = create_access_token(data={"sub": user.username})
+            access_token = create_access_token(data={"sub": user.username, "scope": " ".join(valid_scopes)})
             response_params["access_token"] = access_token
             response_params["token_type"] = "bearer"
             response_params["expires_in"] = ACCESS_TOKEN_EXPIRE_MINUTES * 60
