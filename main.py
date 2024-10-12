@@ -102,10 +102,12 @@ class TokenResponse(BaseModel):
 def create_auth_token(user_id: str) -> str:
     auth_token = secrets.token_urlsafe(32)
     auth_entity = datastore.Entity(key=datastore_client.key("AuthToken"))
+    expiration_time = datetime.utcnow() + timedelta(minutes=15)
     auth_entity.update({
         "token": auth_token,
         "user_id": user_id,
-        "expires": datetime.utcnow() + timedelta(minutes=15)
+        "expires": expiration_time,
+        "_ttl": expiration_time  # This property will be used for automatic deletion
     })
     datastore_client.put(auth_entity)
     return auth_token
@@ -115,9 +117,18 @@ def verify_auth_token(auth_token: str) -> Optional[str]:
     query = datastore_client.query(kind="AuthToken")
     query.add_filter("token", "=", auth_token)
     results = list(query.fetch(limit=1))
-    if results and results[0]["expires"] > datetime.utcnow():
-        return results[0]["user_id"]
-    return None
+
+    if not results:
+        return None
+
+    token_entity = results[0]
+
+    if token_entity["expires"] <= datetime.utcnow():
+        # Token is expired, delete it and return None
+        datastore_client.delete(token_entity.key)
+        return None
+
+    return token_entity["user_id"]
 
 def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None, auth_time: Optional[float] = None) -> str:
     now = datetime.utcnow()
@@ -238,13 +249,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         raise credentials_exception
     return user
 
-
-def clean_expired_tokens():
-    query = datastore_client.query(kind="AuthToken")
-    query.add_filter("expires", "<", datetime.utcnow())
-    expired_tokens = list(query.fetch())
-    for token in expired_tokens:
-        datastore_client.delete(token.key)
 
 # Endpoints
 @app.post("/token", response_model=TokenResponse)
@@ -513,11 +517,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import uvicorn
-    from apscheduler.schedulers.background import BackgroundScheduler
-
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(clean_expired_tokens, 'interval', minutes=15)
-    scheduler.start()
 
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)

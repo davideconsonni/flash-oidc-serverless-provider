@@ -21,3 +21,7 @@
 
 ## Contributions:
 Feel free to contribute by opening issues or submitting pull requests. We welcome feedback and suggestions to improve this project.
+
+
+---
+gcloud datastore indexes create --kind=AuthToken
