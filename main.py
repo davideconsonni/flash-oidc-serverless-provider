@@ -7,9 +7,8 @@ from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from fastapi.responses import RedirectResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from google.cloud import datastore
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -22,6 +21,8 @@ SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 1
+ID_TOKEN_EXPIRE_MINUTES = 60
+ISSUER = "https://flash-oidc-serverless-provider.com"
 
 # Custom namespace for OpenID users
 NAMESPACE = "openid_users"
@@ -91,9 +92,41 @@ class AuthorizationRequest(BaseModel):
     scope: str
     state: str
 
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    refresh_token: str
+    expires_in: int
+    id_token: str
+
 # --- Fine Modelli Pydantic ---
 
 # Funzioni di utilità
+def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None, auth_time: Optional[float] = None) -> str:
+    now = datetime.utcnow()
+    expires = now + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
+
+    payload = {
+        "iss": ISSUER,
+        "sub": user.username,  # Usiamo username come identificatore univoco
+        "aud": client_id,
+        "exp": expires,
+        "iat": now,
+        "auth_time": auth_time or now.timestamp(),
+    }
+
+    if nonce:
+        payload["nonce"] = nonce
+
+    # Aggiungi claims standard se disponibili
+    if user.email:
+        payload["email"] = user.email
+    if user.full_name:
+        payload["name"] = user.full_name
+
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
 def get_user(username: str) -> Optional[UserInDB]:
     user_key = datastore_client.key("User", username)
     user_data = datastore_client.get(user_key)
@@ -190,18 +223,18 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     return user
 
 # Endpoints
-@app.post("/token")
+@app.post("/token", response_model=TokenResponse)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    # Verify client credentials
+    # Verifica le credenziali del client
     if not verify_client(form_data.client_id, form_data.client_secret):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid client credentials",
         )
 
-    # Check if this is an authorization code grant
+    # Controlla se questa è una concessione del codice di autorizzazione
     if form_data.grant_type == "authorization_code":
-        # Validate the authorization code
+        # Valida il codice di autorizzazione
         query = datastore_client.query(kind="AuthorizationCode")
         query.add_filter("code", "=", form_data.code)
         query.add_filter("client_id", "=", form_data.client_id)
@@ -215,12 +248,16 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
         auth_code = results[0]
         user = get_user(auth_code["user_id"])
+        nonce = auth_code.get("nonce")
+        auth_time = auth_code.get("auth_time")
 
-        # Delete the used authorization code
+        # Elimina il codice di autorizzazione utilizzato
         datastore_client.delete(results[0].key)
     else:
-        # Fallback to password grant (as implemented before)
+        # Fallback alla concessione della password (come implementato prima)
         user = authenticate_user(form_data.username, form_data.password)
+        nonce = None
+        auth_time = datetime.utcnow().timestamp()
 
     if not user:
         raise HTTPException(
@@ -229,7 +266,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Generate tokens as usual
+    # Genera i token come al solito
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
@@ -238,11 +275,15 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     refresh_token = create_refresh_token(user.username)
     access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
+    # Genera l'ID Token
+    id_token = create_id_token(user, form_data.client_id, nonce, auth_time)
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
         "expires_in": access_token_expires_in_seconds,
+        "id_token": id_token,
     }
 
 
@@ -321,18 +362,17 @@ async def read_users_me(current_user: User = Depends(get_current_user)):
 async def openid_configuration(request: Request):
     base_url = str(request.base_url).rstrip('/')
     return {
-        "issuer": base_url,
+        "issuer": ISSUER,
         "authorization_endpoint": f"{base_url}/authorize",
         "token_endpoint": f"{base_url}/token",
         "userinfo_endpoint": f"{base_url}/userinfo",
         "jwks_uri": f"{base_url}/jwks.json",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "response_types_supported": ["code", "id_token", "id_token token"],
         "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["HS256"],
+        "id_token_signing_alg_values_supported": [ALGORITHM],
         "scopes_supported": ["openid", "profile", "email"],
-        "token_endpoint_auth_methods_supported": ["client_secret_basic"],
-        "claims_supported": ["sub", "iss", "name", "email"]
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "email"]
     }
 
 @app.get("/jwks.json")
@@ -350,47 +390,74 @@ async def jwks():
     }
 
 @app.get("/authorize")
-async def authorize(request: Request, auth_request: AuthorizationRequest = Depends()):
-    # Validate the authorization request
-    if auth_request.response_type != "code":
+async def authorize(
+        request: Request,
+        response_type: str,
+        client_id: str,
+        redirect_uri: str,
+        scope: str,
+        state: str,
+        nonce: Optional[str] = None
+):
+    # Valida la richiesta di autorizzazione
+    if response_type not in ["code", "id_token", "id_token token"]:
         raise HTTPException(status_code=400, detail="Invalid response_type")
 
-    # Verify client_id
-    client = datastore_client.get(datastore_client.key("Client", auth_request.client_id))
+    # Verifica client_id
+    client = datastore_client.get(datastore_client.key("Client", client_id))
     if not client:
         raise HTTPException(status_code=400, detail="Invalid client_id")
 
-    # Verify redirect_uri (you should implement a proper check against registered URIs)
-    if not auth_request.redirect_uri:
+    # Verifica redirect_uri (dovresti implementare un controllo appropriato contro gli URI registrati)
+    if not redirect_uri:
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
 
-    # Check if the user is already authenticated
+    # Verifica che lo scope includa 'openid'
+    if "openid" not in scope.split():
+        raise HTTPException(status_code=400, detail="Scope 'openid' is required")
+
+    # Controlla se l'utente è già autenticato
     user_id = request.session.get("user_id")
     if not user_id:
-        # If the user is not authenticated, redirect to login page
+        # Se l'utente non è autenticato, reindirizza alla pagina di login
         return RedirectResponse(f"/login?{urlencode(dict(request.query_params))}")
 
-    # Generate authorization code
+    user = get_user(user_id)
+
+    # Genera il codice di autorizzazione
     auth_code = secrets.token_urlsafe(32)
 
-    # Store the authorization code
+    # Memorizza il codice di autorizzazione
     auth_code_entity = datastore.Entity(key=datastore_client.key("AuthorizationCode"))
     auth_code_entity.update({
         "code": auth_code,
-        "client_id": auth_request.client_id,
-        "redirect_uri": auth_request.redirect_uri,
-        "scope": auth_request.scope,
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
         "user_id": user_id,
+        "nonce": nonce,
+        "auth_time": datetime.utcnow().timestamp(),
         "expires": datetime.utcnow() + timedelta(minutes=10)
     })
     datastore_client.put(auth_code_entity)
 
-    # Redirect back to the client with the authorization code
-    params = {
-        "code": auth_code,
-        "state": auth_request.state
-    }
-    redirect_uri = f"{auth_request.redirect_uri}?{urlencode(params)}"
+    # Prepara la risposta in base al response_type
+    response_params = {"state": state}
+
+    if response_type == "code":
+        response_params["code"] = auth_code
+    elif response_type in ["id_token", "id_token token"]:
+        id_token = create_id_token(user, client_id, nonce)
+        response_params["id_token"] = id_token
+
+        if response_type == "id_token token":
+            access_token = create_access_token(data={"sub": user.username})
+            response_params["access_token"] = access_token
+            response_params["token_type"] = "bearer"
+            response_params["expires_in"] = ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+    # Reindirizza al client con i parametri appropriati
+    redirect_uri = f"{redirect_uri}?{urlencode(response_params)}"
     return RedirectResponse(redirect_uri)
 
 @app.get("/login", response_class=HTMLResponse)
