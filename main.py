@@ -1,3 +1,4 @@
+import logging
 import base64
 import logging
 import os
@@ -8,21 +9,23 @@ from urllib.parse import urlencode
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body, Form
+from fastapi import Body, Form
+from fastapi import Depends, HTTPException, status, Request
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse, HTMLResponse
-from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.security import HTTPBasic
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.security.utils import get_authorization_scheme_param
 from google.cloud import datastore
 from google.cloud import storage
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, constr, EmailStr, Field
-from starlette.templating import Jinja2Templates
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from fastapi.responses import JSONResponse
+from starlette.templating import Jinja2Templates
 
 # Configurazione
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "busysummer44-flash-oidc-serverless-provider")
@@ -338,6 +341,9 @@ def store_client(client_data: ClientRegistrationData):
     datastore_client.put(entity)
 
 def verify_client(client_id: str, client_secret: str) -> bool:
+    if not client_id or not client_secret:
+        return False
+
     # Fetch client details from Datastore
     client_key = datastore_client.key("Client", client_id)
     client_data = datastore_client.get(client_key)
@@ -374,19 +380,30 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """
     OAuth2 compatible token login, get an access token for future requests.
-
-    - **grant_type**: Must be "password" for username/password authentication or "authorization_code" for OAuth2 flow
-    - **username**: The user's username (only for password grant type)
-    - **password**: The user's password (only for password grant type)
-    - **scope**: The requested scopes, space-separated
-    - **client_id**: The client's ID
-    - **client_secret**: The client's secret
-    - **code**: The authorization code (only for authorization_code grant type)
-
-    Returns a token response containing access_token, refresh_token, and id_token.
     """
+    # Gestione dell'Authorization header per le credenziali del client
+    client_id = None
+    client_secret = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        scheme, param = get_authorization_scheme_param(auth_header)
+        if scheme.lower() == "basic":
+            try:
+                decoded = base64.b64decode(param).decode("ascii")
+                client_id, client_secret = decoded.split(":")
+            except:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid authentication credentials",
+                    headers={"WWW-Authenticate": "Basic"},
+                )
+    else:
+        # Se non c'è l'Authorization header, usa i dati del form
+        client_id = form_data.client_id
+        client_secret = form_data.client_secret
+
     # Verifica le credenziali del client
-    if not verify_client(form_data.client_id, form_data.client_secret):
+    if not verify_client(client_id, client_secret):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid client credentials",
@@ -397,7 +414,7 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
         # Valida il codice di autorizzazione
         query = datastore_client.query(kind="AuthorizationCode")
         query.add_filter("code", "=", form_data.code)
-        query.add_filter("client_id", "=", form_data.client_id)
+        query.add_filter("client_id", "=", client_id)
         results = list(query.fetch(limit=1))
 
         if not results or results[0]["expires"] < datetime.utcnow():
@@ -433,7 +450,7 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
     if "openid" not in valid_scopes:
         valid_scopes.add("openid")
 
-    # Genera i token come al solito
+    # Genera i token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username, "scope": " ".join(valid_scopes)},
@@ -444,7 +461,7 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
     access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
     # Genera l'ID Token
-    id_token = create_id_token(user, form_data.client_id, valid_scopes, nonce, auth_time)
+    id_token = create_id_token(user, client_id, valid_scopes, nonce, auth_time)
 
     return {
         "access_token": access_token,
