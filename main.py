@@ -65,10 +65,9 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="OpenID Connect Provider API",
     description="API per la gestione dell'autenticazione e autorizzazione OpenID Connect",
-    version="1.0.0",
+    version="3.1.0",
     openapi_url="/openapi.json",
     docs_url="/docs",
-    redoc_url="/redoc",
     servers=[
         {"url": BASE_URL, "description": "Current server"},
     ]
@@ -375,7 +374,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
 
 # Endpoints
-@app.post("/token", response_model=TokenResponse, tags=["Authentication"])
+@app.post("/token", response_model=TokenResponse, tags=["authentication"])
 @limiter.limit("200/minute")
 async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     """
@@ -491,11 +490,11 @@ async def register_client(request: Request, client_data: ClientRegistrationData 
     return {"client_id": client_data.client_id}
 
 
-@app.post("/refresh", tags=["Authentication"])
+@app.post("/refresh", tags=["authentication"])
 @limiter.limit("200/minute")
 async def refresh_token(request: Request, refresh_token_data: RefreshToken = Body(...)):
     """
-    Use a refresh token to obtain a new access token.
+    Use a refresh token to get a new access token.
 
     - **refresh_token**: The refresh token obtained during the initial token request
 
@@ -556,7 +555,7 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
 
 
 
-@app.get("/userinfo", tags=["Authentication"])
+@app.get("/userinfo", tags=["authentication"])
 @limiter.limit("200/minute")
 async def read_users_me(request: Request, current_user: User = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
     """
@@ -582,7 +581,7 @@ async def read_users_me(request: Request, current_user: User = Depends(get_curre
 
     return user_info
 
-@app.get("/.well-known/openid-configuration", tags=["Authentication"])
+@app.get("/.well-known/openid-configuration", tags=["authentication"])
 @limiter.limit("200/minute")
 async def openid_configuration(request: Request):
     """
@@ -605,7 +604,7 @@ async def openid_configuration(request: Request):
         "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "email"]
     }
 
-@app.get("/jwks.json", tags=["Authentication"])
+@app.get("/jwks.json", tags=["authentication"])
 @limiter.limit("200/minute")
 async def jwks(request: Request):
     """
@@ -623,7 +622,7 @@ async def jwks(request: Request):
     }
     return {"keys": [jwk]}
 
-@app.get("/authorize", tags=["Authentication"])
+@app.get("/authorize", tags=["authentication"])
 @limiter.limit("200/minute")
 async def authorize(
         request: Request,
@@ -718,7 +717,7 @@ async def login(request: Request):
     """
     return templates.TemplateResponse("login.html", {"request": request, "next": request.query_params.get("next")})
 
-@app.post("/login", tags=["Authentication"])
+@app.post("/login")
 @limiter.limit("200/minute")
 async def login_submit(
         request: Request,
@@ -748,7 +747,7 @@ async def login_submit(
         return RedirectResponse(f"{next}&auth_token={auth_token}", status_code=303)
     return RedirectResponse(f"/?auth_token={auth_token}", status_code=303)
 
-@app.get("/health")
+@app.get("/health", tags=["monitoring"])
 @limiter.limit("200/minute")
 async def health_check(request: Request):
     """
