@@ -14,10 +14,26 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, constr, EmailStr
 from starlette.templating import Jinja2Templates
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
+import base64
 
 # Configurazione
-SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
-ALGORITHM = "HS256"
+ALGORITHM = "RS256"
+
+private_key = rsa.generate_private_key(
+    public_exponent=65537,
+    key_size=2048
+)
+public_key = private_key.public_key()
+
+pem = public_key.public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo
+)
+
+kid = base64.urlsafe_b64encode(pem).decode('utf-8')[:8]
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 REFRESH_TOKEN_EXPIRE_DAYS = 1
 ID_TOKEN_EXPIRE_MINUTES = 60
@@ -136,7 +152,7 @@ def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None,
 
     payload = {
         "iss": ISSUER,
-        "sub": user.username,  # Usiamo username come identificatore univoco
+        "sub": user.username,
         "aud": client_id,
         "exp": expires,
         "iat": now,
@@ -146,13 +162,19 @@ def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None,
     if nonce:
         payload["nonce"] = nonce
 
-    # Aggiungi claims standard se disponibili
     if user.email:
         payload["email"] = user.email
     if user.full_name:
         payload["name"] = user.full_name
 
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    # Converti la chiave privata in formato PEM
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    return jwt.encode(payload, pem, algorithm=ALGORITHM)
 
 def get_user(username: str) -> Optional[UserInDB]:
     user_key = datastore_client.key("User", username)
@@ -187,14 +209,31 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     else:
         expire = datetime.utcnow() + timedelta(minutes=15)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+    # Converti la chiave privata in formato PEM
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    encoded_jwt = jwt.encode(to_encode, pem, algorithm=ALGORITHM)
     return encoded_jwt
 
 def create_refresh_token(username: str) -> str:
     expires = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    refresh_token = create_access_token(
-        data={"sub": username, "type": "refresh"},
-        expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    # Converti la chiave privata in formato PEM
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    refresh_token = jwt.encode(
+        {"sub": username, "type": "refresh", "exp": expires},
+        pem,
+        algorithm=ALGORITHM
     )
 
     # Salva il refresh token nel Datastore
@@ -237,7 +276,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, public_key, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
             raise credentials_exception
@@ -328,7 +367,7 @@ async def register_client(client_data: ClientRegistrationData = Body(...)):
 @app.post("/refresh")
 async def refresh_token(refresh_token_data: RefreshToken = Body(...)):
     try:
-        payload = jwt.decode(refresh_token_data.refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(refresh_token_data.refresh_token, public_key, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -405,17 +444,15 @@ async def openid_configuration(request: Request):
 
 @app.get("/jwks.json")
 async def jwks():
-    return {
-        "keys": [
-            {
-                "kty": "oct",
-                "use": "sig",
-                "kid": "1",
-                "k": SECRET_KEY,
-                "alg": "HS256"
-            }
-        ]
+    jwk = {
+        "kty": "RSA",
+        "use": "sig",
+        "kid": kid,
+        "alg": ALGORITHM,
+        "n": base64.urlsafe_b64encode(public_key.public_numbers().n.to_bytes((public_key.public_numbers().n.bit_length() + 7) // 8, byteorder='big')).decode('utf-8').rstrip('='),
+        "e": base64.urlsafe_b64encode(public_key.public_numbers().e.to_bytes((public_key.public_numbers().e.bit_length() + 7) // 8, byteorder='big')).decode('utf-8').rstrip('='),
     }
+    return {"keys": [jwk]}
 
 @app.get("/authorize")
 async def authorize(
