@@ -102,7 +102,7 @@ class TokenResponse(BaseModel):
 def create_auth_token(user_id: str) -> str:
     auth_token = secrets.token_urlsafe(32)
     auth_entity = datastore.Entity(key=datastore_client.key("AuthToken"))
-    expiration_time = datetime.utcnow() + timedelta(minutes=15)
+    expiration_time = datetime.utcnow() + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
     auth_entity.update({
         "token": auth_token,
         "user_id": user_id,
