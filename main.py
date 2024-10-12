@@ -13,7 +13,6 @@ from google.cloud import datastore
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, constr, EmailStr
-from starlette.middleware.sessions import SessionMiddleware
 from starlette.templating import Jinja2Templates
 
 # Configurazione
@@ -37,9 +36,6 @@ app = FastAPI(title="OpenID Connect Provider")
 
 # Initialize Jinja2 templates
 templates = Jinja2Templates(directory="templates")
-
-# Add SessionMiddleware to the app
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 # Configurazione CORS
 app.add_middleware(
@@ -103,6 +99,26 @@ class TokenResponse(BaseModel):
 # --- Fine Modelli Pydantic ---
 
 # Funzioni di utilità
+def create_auth_token(user_id: str) -> str:
+    auth_token = secrets.token_urlsafe(32)
+    auth_entity = datastore.Entity(key=datastore_client.key("AuthToken"))
+    auth_entity.update({
+        "token": auth_token,
+        "user_id": user_id,
+        "expires": datetime.utcnow() + timedelta(minutes=15)
+    })
+    datastore_client.put(auth_entity)
+    return auth_token
+
+
+def verify_auth_token(auth_token: str) -> Optional[str]:
+    query = datastore_client.query(kind="AuthToken")
+    query.add_filter("token", "=", auth_token)
+    results = list(query.fetch(limit=1))
+    if results and results[0]["expires"] > datetime.utcnow():
+        return results[0]["user_id"]
+    return None
+
 def create_id_token(user: UserInDB, client_id: str, nonce: Optional[str] = None, auth_time: Optional[float] = None) -> str:
     now = datetime.utcnow()
     expires = now + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
@@ -221,6 +237,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     if user is None:
         raise credentials_exception
     return user
+
+
+def clean_expired_tokens():
+    query = datastore_client.query(kind="AuthToken")
+    query.add_filter("expires", "<", datetime.utcnow())
+    expired_tokens = list(query.fetch())
+    for token in expired_tokens:
+        datastore_client.delete(token.key)
 
 # Endpoints
 @app.post("/token", response_model=TokenResponse)
@@ -397,7 +421,8 @@ async def authorize(
         redirect_uri: str,
         scope: str,
         state: str,
-        nonce: Optional[str] = None
+        nonce: Optional[str] = None,
+        auth_token: Optional[str] = None
 ):
     # Valida la richiesta di autorizzazione
     if response_type not in ["code", "id_token", "id_token token"]:
@@ -408,18 +433,11 @@ async def authorize(
     if not client:
         raise HTTPException(status_code=400, detail="Invalid client_id")
 
-    # Verifica redirect_uri (dovresti implementare un controllo appropriato contro gli URI registrati)
-    if not redirect_uri:
-        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+    if not auth_token:
+        return RedirectResponse(f"/login?{urlencode(dict(request.query_params))}")
 
-    # Verifica che lo scope includa 'openid'
-    if "openid" not in scope.split():
-        raise HTTPException(status_code=400, detail="Scope 'openid' is required")
-
-    # Controlla se l'utente è già autenticato
-    user_id = request.session.get("user_id")
+    user_id = verify_auth_token(auth_token)
     if not user_id:
-        # Se l'utente non è autenticato, reindirizza alla pagina di login
         return RedirectResponse(f"/login?{urlencode(dict(request.query_params))}")
 
     user = get_user(user_id)
@@ -462,7 +480,7 @@ async def authorize(
 
 @app.get("/login", response_class=HTMLResponse)
 async def login(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
+    return templates.TemplateResponse("login.html", {"request": request, "next": request.query_params.get("next")})
 
 @app.post("/login")
 async def login_submit(
@@ -475,16 +493,14 @@ async def login_submit(
     if not user:
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "Incorrect username or password"}
+            {"request": request, "error": "Incorrect username or password", "next": next}
         )
 
-    # Set session
-    request.session["user_id"] = user.username
+    auth_token = create_auth_token(user.username)
 
-    # Redirect back to the /authorize endpoint with the original parameters
     if next:
-        return RedirectResponse(next, status_code=303)
-    return RedirectResponse("/", status_code=303)
+        return RedirectResponse(f"{next}&auth_token={auth_token}", status_code=303)
+    return RedirectResponse(f"/?auth_token={auth_token}", status_code=303)
 
 # Gestione errori
 @app.exception_handler(Exception)
@@ -497,5 +513,11 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 if __name__ == "__main__":
     import uvicorn
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(clean_expired_tokens, 'interval', minutes=15)
+    scheduler.start()
+
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(app, host="0.0.0.0", port=port)

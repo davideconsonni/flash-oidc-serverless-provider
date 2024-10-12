@@ -15,7 +15,25 @@
     <input type="text" id="username" name="username" required><br><br>
     <label for="password">Password:</label>
     <input type="password" id="password" name="password" required><br><br>
-    <input type="hidden" name="next" value="{{ request.query_params.get('next', '/') }}">
+    <input type="hidden" name="next" value="{{ next or request.query_params.get('next', '/') }}">
+    {% if request.query_params.get('response_type') %}
+    <input type="hidden" name="response_type" value="{{ request.query_params.get('response_type') }}">
+    {% endif %}
+    {% if request.query_params.get('client_id') %}
+    <input type="hidden" name="client_id" value="{{ request.query_params.get('client_id') }}">
+    {% endif %}
+    {% if request.query_params.get('redirect_uri') %}
+    <input type="hidden" name="redirect_uri" value="{{ request.query_params.get('redirect_uri') }}">
+    {% endif %}
+    {% if request.query_params.get('scope') %}
+    <input type="hidden" name="scope" value="{{ request.query_params.get('scope') }}">
+    {% endif %}
+    {% if request.query_params.get('state') %}
+    <input type="hidden" name="state" value="{{ request.query_params.get('state') }}">
+    {% endif %}
+    {% if request.query_params.get('nonce') %}
+    <input type="hidden" name="nonce" value="{{ request.query_params.get('nonce') }}">
+    {% endif %}
     <input type="submit" value="Login">
 </form>
 </body>
