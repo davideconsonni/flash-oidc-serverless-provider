@@ -11,6 +11,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from google.cloud import datastore
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+from pydantic import BaseModel, constr, EmailStr
 
 # Configurazione
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
@@ -48,32 +49,32 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Custom Python classes
-class User:
-    def __init__(self, username: str, email: str, full_name: Optional[str] = None, disabled: Optional[bool] = None):
-        self.username = username
-        self.email = email
-        self.full_name = full_name
-        self.disabled = disabled
+# --- Modelli Pydantic per la validazione ---
+class User(BaseModel):
+    username: constr(min_length=3, max_length=20)
+    email: EmailStr
+    full_name: Optional[str] = None
+    disabled: Optional[bool] = False
 
 class UserInDB(User):
-    def __init__(self, username: str, hashed_password: str, email: str, full_name: Optional[str] = None, disabled: Optional[bool] = None):
-        super().__init__(username, email, full_name, disabled)
-        self.hashed_password = hashed_password
+    hashed_password: str
 
-class Token:
-    def __init__(self, access_token: str, token_type: str, refresh_token: str):
-        self.access_token = access_token
-        self.token_type = token_type
-        self.refresh_token = refresh_token
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    refresh_token: str
 
-class TokenData:
-    def __init__(self, username: Optional[str] = None):
-        self.username = username
+class TokenData(BaseModel):
+    username: Optional[str] = None
 
-class RefreshToken:
-    def __init__(self, refresh_token: str):
-        self.refresh_token = refresh_token
+class RefreshToken(BaseModel):
+    refresh_token: str
+
+class ClientRegistrationData(BaseModel):
+    client_id: str
+    client_secret: str
+
+# --- Fine Modelli Pydantic ---
 
 # Funzioni di utilità
 def get_user(username: str) -> Optional[UserInDB]:
@@ -86,7 +87,7 @@ def get_user(username: str) -> Optional[UserInDB]:
     # Ensure username is explicitly included in the user data
     user_data["username"] = username
 
-    return UserInDB(username=user_data["username"], hashed_password=user_data["hashed_password"], email=user_data["email"], full_name=user_data.get("full_name"), disabled=user_data.get("disabled"))
+    return UserInDB(**user_data)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
@@ -130,13 +131,13 @@ def create_refresh_token(username: str) -> str:
 
     return refresh_token
 
-def store_client(client_id: str, client_secret: str):
+def store_client(client_data: ClientRegistrationData):
     # Hash the client_secret before storing
-    hashed_client_secret = get_password_hash(client_secret)
+    hashed_client_secret = get_password_hash(client_data.client_secret)
 
-    entity = datastore.Entity(key=datastore_client.key("Client", client_id))
+    entity = datastore.Entity(key=datastore_client.key("Client", client_data.client_id))
     entity.update({
-        "client_id": client_id,
+        "client_id": client_data.client_id,
         "hashed_client_secret": hashed_client_secret,
     })
     datastore_client.put(entity)
@@ -208,23 +209,19 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
 
 
 @app.post("/register")
-async def register_client(data: dict = Body(...)):
-    client_id = data.get("client_id")
-    client_secret = data.get("client_secret")
-
-    if not client_id or not client_secret:
-        raise HTTPException(status_code=400, detail="client_id and client_secret are required")
+async def register_client(client_data: ClientRegistrationData = Body(...)):
+    # La validazione dei dati è già gestita da Pydantic grazie al modello 'ClientRegistrationData'
 
     # Store the client credentials securely
-    store_client(client_id, client_secret)
+    store_client(client_data)
 
-    return {"client_id": client_id}
+    return {"client_id": client_data.client_id}
 
 
 @app.post("/refresh")
-async def refresh_token(refresh_token: dict):
+async def refresh_token(refresh_token_data: RefreshToken = Body(...)):
     try:
-        payload = jwt.decode(refresh_token['refresh_token'], SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(refresh_token_data.refresh_token, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -240,7 +237,7 @@ async def refresh_token(refresh_token: dict):
 
         # Verifica nel Datastore
         query = datastore_client.query(kind="RefreshToken")
-        query.add_filter("token", "=", refresh_token['refresh_token'])
+        query.add_filter("token", "=", refresh_token_data.refresh_token)
         query.add_filter("username", "=", username)
         results = list(query.fetch(limit=1))
 

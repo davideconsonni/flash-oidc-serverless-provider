@@ -4,3 +4,4 @@ python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
 google-cloud-datastore
+pydantic[email]

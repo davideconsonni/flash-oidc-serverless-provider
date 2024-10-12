@@ -1,7 +1,7 @@
 ### Environment variables
 @baseUrl = http://localhost:8080
-@username = a
-@password = a
+@username = aaa
+@password = aaa
 @client_id = your_client_id
 @client_secret = your_client_secret
 
