@@ -3,15 +3,19 @@ import os
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBasic
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
 from google.cloud import datastore
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, constr, EmailStr
+from starlette.middleware.sessions import SessionMiddleware
+from starlette.templating import Jinja2Templates
 
 # Configurazione
 SECRET_KEY = os.getenv("SECRET_KEY", secrets.token_urlsafe(32))
@@ -29,6 +33,12 @@ security = HTTPBasic()
 
 # Inizializzazione FastAPI
 app = FastAPI(title="OpenID Connect Provider")
+
+# Initialize Jinja2 templates
+templates = Jinja2Templates(directory="templates")
+
+# Add SessionMiddleware to the app
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
 # Configurazione CORS
 app.add_middleware(
@@ -73,6 +83,13 @@ class RefreshToken(BaseModel):
 class ClientRegistrationData(BaseModel):
     client_id: str
     client_secret: str
+
+class AuthorizationRequest(BaseModel):
+    response_type: str
+    client_id: str
+    redirect_uri: str
+    scope: str
+    state: str
 
 # --- Fine Modelli Pydantic ---
 
@@ -175,15 +192,36 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 # Endpoints
 @app.post("/token")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
-    # Verifica le credenziali del client
+    # Verify client credentials
     if not verify_client(form_data.client_id, form_data.client_secret):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid client credentials",
         )
 
-    # Autentica l'utente
-    user = authenticate_user(form_data.username, form_data.password)
+    # Check if this is an authorization code grant
+    if form_data.grant_type == "authorization_code":
+        # Validate the authorization code
+        query = datastore_client.query(kind="AuthorizationCode")
+        query.add_filter("code", "=", form_data.code)
+        query.add_filter("client_id", "=", form_data.client_id)
+        results = list(query.fetch(limit=1))
+
+        if not results or results[0]["expires"] < datetime.utcnow():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired authorization code",
+            )
+
+        auth_code = results[0]
+        user = get_user(auth_code["user_id"])
+
+        # Delete the used authorization code
+        datastore_client.delete(results[0].key)
+    else:
+        # Fallback to password grant (as implemented before)
+        user = authenticate_user(form_data.username, form_data.password)
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -204,7 +242,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "expires": access_token_expires_in_seconds,
+        "expires_in": access_token_expires_in_seconds,
     }
 
 
@@ -289,6 +327,7 @@ async def openid_configuration(request: Request):
         "userinfo_endpoint": f"{base_url}/userinfo",
         "jwks_uri": f"{base_url}/jwks.json",
         "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["HS256"],
         "scopes_supported": ["openid", "profile", "email"],
@@ -309,6 +348,76 @@ async def jwks():
             }
         ]
     }
+
+@app.get("/authorize")
+async def authorize(request: Request, auth_request: AuthorizationRequest = Depends()):
+    # Validate the authorization request
+    if auth_request.response_type != "code":
+        raise HTTPException(status_code=400, detail="Invalid response_type")
+
+    # Verify client_id
+    client = datastore_client.get(datastore_client.key("Client", auth_request.client_id))
+    if not client:
+        raise HTTPException(status_code=400, detail="Invalid client_id")
+
+    # Verify redirect_uri (you should implement a proper check against registered URIs)
+    if not auth_request.redirect_uri:
+        raise HTTPException(status_code=400, detail="Invalid redirect_uri")
+
+    # Check if the user is already authenticated
+    user_id = request.session.get("user_id")
+    if not user_id:
+        # If the user is not authenticated, redirect to login page
+        return RedirectResponse(f"/login?{urlencode(dict(request.query_params))}")
+
+    # Generate authorization code
+    auth_code = secrets.token_urlsafe(32)
+
+    # Store the authorization code
+    auth_code_entity = datastore.Entity(key=datastore_client.key("AuthorizationCode"))
+    auth_code_entity.update({
+        "code": auth_code,
+        "client_id": auth_request.client_id,
+        "redirect_uri": auth_request.redirect_uri,
+        "scope": auth_request.scope,
+        "user_id": user_id,
+        "expires": datetime.utcnow() + timedelta(minutes=10)
+    })
+    datastore_client.put(auth_code_entity)
+
+    # Redirect back to the client with the authorization code
+    params = {
+        "code": auth_code,
+        "state": auth_request.state
+    }
+    redirect_uri = f"{auth_request.redirect_uri}?{urlencode(params)}"
+    return RedirectResponse(redirect_uri)
+
+@app.get("/login", response_class=HTMLResponse)
+async def login(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
+
+@app.post("/login")
+async def login_submit(
+        request: Request,
+        username: str = Form(...),
+        password: str = Form(...),
+        next: str = Form(None)
+):
+    user = authenticate_user(username, password)
+    if not user:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": "Incorrect username or password"}
+        )
+
+    # Set session
+    request.session["user_id"] = user.username
+
+    # Redirect back to the /authorize endpoint with the original parameters
+    if next:
+        return RedirectResponse(next, status_code=303)
+    return RedirectResponse("/", status_code=303)
 
 # Gestione errori
 @app.exception_handler(Exception)

@@ -5,3 +5,5 @@ passlib[bcrypt]
 python-multipart
 google-cloud-datastore
 pydantic[email]
+jinja2
+itsdangerous
