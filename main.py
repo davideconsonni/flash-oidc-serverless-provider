@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import secrets
@@ -5,48 +6,44 @@ from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import urlencode
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Body, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBasic, OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from google.cloud import datastore
+from google.cloud import storage
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel, constr, EmailStr
 from starlette.templating import Jinja2Templates
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
-import base64
 
 # Configurazione
-ALGORITHM = "RS256"
+BUCKET_NAME = os.environ.get("BUCKET_NAME", "busysummer44-flash-oidc-serverless-provider")
+PRIVATE_KEY_BLOB_NAME = os.environ.get("PRIVATE_KEY_BLOB_NAME", "rsa_private_key.pem")
+PUBLIC_KEY_BLOB_NAME = os.environ.get("PUBLIC_KEY_BLOB_NAME", "rsa_public_key.pem")
+
+ALGORITHM = os.environ.get("ALGORITHM", "RS256")
 SUPPORTED_SCOPES = {"openid", "profile", "email"}
 
-private_key = rsa.generate_private_key(
-    public_exponent=65537,
-    key_size=2048
-)
-public_key = private_key.public_key()
-
-pem = public_key.public_bytes(
-    encoding=serialization.Encoding.PEM,
-    format=serialization.PublicFormat.SubjectPublicKeyInfo
-)
-
-kid = base64.urlsafe_b64encode(pem).decode('utf-8')[:8]
-
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
-REFRESH_TOKEN_EXPIRE_DAYS = 1
-ID_TOKEN_EXPIRE_MINUTES = 60
-ISSUER = "https://flash-oidc-serverless-provider.com"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 1))
+ID_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ID_TOKEN_EXPIRE_MINUTES", 60))
+ISSUER = os.environ.get("ISSUER", "https://flash-oidc-serverless-provider.com")
 
 # Custom namespace for OpenID users
-NAMESPACE = "openid_users"
+NAMESPACE = os.environ.get("NAMESPACE", "openid_users")
 
 # Initialize Datastore client with the custom namespace
 datastore_client = datastore.Client(namespace=NAMESPACE)
 
 security = HTTPBasic()
+
+# Inizializza il client di Storage
+storage_client = storage.Client()
+bucket = storage_client.bucket(BUCKET_NAME)
+
 
 # Inizializzazione FastAPI
 app = FastAPI(title="OpenID Connect Provider")
@@ -116,6 +113,50 @@ class TokenResponse(BaseModel):
 # --- Fine Modelli Pydantic ---
 
 # Funzioni di utilità
+
+# Funzione per salvare le chiavi nel Datastore
+def save_keys_to_storage(private_key, public_key):
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    # Salva la chiave privata
+    private_blob = bucket.blob(PRIVATE_KEY_BLOB_NAME)
+    private_blob.upload_from_string(private_pem)
+
+    # Salva la chiave pubblica
+    public_blob = bucket.blob(PUBLIC_KEY_BLOB_NAME)
+    public_blob.upload_from_string(public_pem)
+
+
+def get_keys_from_storage():
+    try:
+        # Recupera la chiave privata
+        private_blob = bucket.blob(PRIVATE_KEY_BLOB_NAME)
+        private_pem = private_blob.download_as_bytes()
+
+        # Recupera la chiave pubblica
+        public_blob = bucket.blob(PUBLIC_KEY_BLOB_NAME)
+        public_pem = public_blob.download_as_bytes()
+
+        private_key = serialization.load_pem_private_key(
+            private_pem,
+            password=None
+        )
+        public_key = serialization.load_pem_public_key(public_pem)
+
+        return private_key, public_key
+    except Exception as e:
+        print(f"Errore nel recupero delle chiavi: {e}")
+        return None, None
+
 def create_auth_token(user_id: str) -> str:
     auth_token = secrets.token_urlsafe(32)
     auth_entity = datastore.Entity(key=datastore_client.key("AuthToken"))
@@ -585,6 +626,27 @@ async def generic_exception_handler(request: Request, exc: Exception):
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content="An internal server error occurred."
     )
+
+
+# ---  Inizializzazione delle chiavi ---
+private_key, public_key = get_keys_from_storage()
+
+if not private_key or not public_key:
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048
+    )
+    public_key = private_key.public_key()
+    save_keys_to_storage(private_key, public_key)
+
+# Il resto del codice rimane invariato
+pem = public_key.public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo
+)
+
+kid = base64.urlsafe_b64encode(pem).decode('utf-8')[:8]
+# --- Inizializzazione delle chiavi ---
 
 if __name__ == "__main__":
     import uvicorn

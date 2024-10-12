@@ -8,3 +8,4 @@ pydantic[email]
 jinja2
 itsdangerous
 apscheduler
+google-cloud-storage
