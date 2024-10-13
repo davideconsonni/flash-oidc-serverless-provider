@@ -1,0 +1,71 @@
+### Environment variables
+@baseUrl = http://localhost:8080
+@username = aaa
+@password = aaa
+@client_id = your_client_id
+@client_secret = your_client_secret
+
+### OpenID Configuration
+GET {{baseUrl}}/.well-known/openid-configuration
+
+
+### JWKS
+GET {{baseUrl}}/jwks.json
+
+
+### Client Registration
+# @name register
+POST {{baseUrl}}/register
+Content-Type: application/json
+
+{
+  "client_id": "{{client_id}}",
+  "client_secret": "{{client_secret}}"
+}
+
+> {%
+    client.global.set("client_id", "{{client_id}}");
+    client.global.set("client_secret", "{{client_secret}}");
+%}
+
+
+### Create a new user
+POST {{baseUrl}}/users
+Content-Type: application/json
+
+{
+  "username": "bbb",
+  "email": "newuser123@example.com",
+  "password": "bbbbbbbbb",
+  "additional_claims": {
+    "full_name": "New User",
+    "street_address": "123 Main St",
+    "locality": "Anytown",
+    "region": "State",
+    "postal_code": "12345",
+    "country": "Country"
+  }
+}
+
+> {%
+    client.global.set("username", response.body.username);
+    client.global.set("password", request.body.password);
+%}
+
+
+### Login to get tokens
+POST {{baseUrl}}/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=password&username=bbb&password=bbbbbbbbb&client_id={{client_id}}&client_secret={{client_secret}}&scope=openid email profile address
+
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+    client.global.set("id_token", response.body.id_token);
+%}
+
+
+### Get User Info
+GET {{baseUrl}}/userinfo
+Authorization: Bearer {{access_token}}

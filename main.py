@@ -5,7 +5,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from datetime import timedelta
-from typing import Optional
+from typing import Dict, Any, Optional
 from urllib.parse import urlencode
 
 from argon2 import PasswordHasher
@@ -24,7 +24,7 @@ from fastapi.security.utils import get_authorization_scheme_param
 from google.cloud import datastore
 from google.cloud import storage
 from jose import JWTError, jwt
-from pydantic import BaseModel, constr, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, validator, constr
 from pythonjsonlogger import jsonlogger
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -36,7 +36,14 @@ PRIVATE_KEY_BLOB_NAME = os.environ.get("PRIVATE_KEY_BLOB_NAME", "rsa_private_key
 PUBLIC_KEY_BLOB_NAME = os.environ.get("PUBLIC_KEY_BLOB_NAME", "rsa_public_key.pem")
 
 ALGORITHM = os.environ.get("ALGORITHM", "RS256")
-SUPPORTED_SCOPES = {"openid", "profile", "email"}
+# Configurazione degli scope e dei claim
+DEFAULT_SCOPES = {"openid", "profile"}
+SCOPE_CLAIMS_MAP = json.loads(os.environ.get("SCOPE_CLAIMS_MAP", '{"profile": ["disabled", "full_name"], "email": ["email"], "address": ["street_address", "locality", "region", "postal_code", "country"]}'))
+
+SUPPORTED_CLAIMS = set(claim for claims in SCOPE_CLAIMS_MAP.values() for claim in claims)
+
+# Aggiorna SUPPORTED_SCOPES per includere gli scope definiti nella configurazione
+SUPPORTED_SCOPES = DEFAULT_SCOPES.union(set(SCOPE_CLAIMS_MAP.keys()))
 
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 1))
@@ -164,11 +171,16 @@ def log_audit_event(event_type: str, user: str, details: dict):
 class User(BaseModel):
     username: constr(min_length=3, max_length=20) = Field(..., description="User's unique username")
     email: EmailStr = Field(..., description="User's email address")
-    full_name: Optional[str] = Field(None, description="User's full name")
-    disabled: Optional[bool] = Field(False, description="Whether the user account is disabled")
+    additional_claims: Dict[str, Any] = Field(default_factory=dict, description="Additional user claims")
 
 class UserInDB(User):
     hashed_password: str = Field(..., description="Hashed password of the user")
+
+    def verify_password(self, plain_password: str) -> bool:
+        return verify_password(plain_password, self.hashed_password)
+
+    class Config:
+        exclude = {"hashed_password"}
 
 class Token(BaseModel):
     access_token: str = Field(..., description="The access token for API requests")
@@ -199,6 +211,20 @@ class TokenResponse(BaseModel):
     refresh_token: str = Field(..., description="Token used to obtain a new access token")
     expires_in: int = Field(..., description="Number of seconds until the access token expires")
     id_token: str = Field(..., description="OpenID Connect ID Token")
+
+
+class DynamicUserCreate(BaseModel):
+    username: str = Field(..., min_length=3, max_length=20)
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    additional_claims: Dict[str, Any] = Field(default_factory=dict)
+
+    @validator('additional_claims')
+    def validate_additional_claims(cls, v):
+        for claim in v.keys():
+            if claim not in SUPPORTED_CLAIMS:
+                raise ValueError(f"Unsupported claim: {claim}")
+        return v
 
 # --- Fine Modelli Pydantic ---
 
@@ -323,19 +349,18 @@ def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional
     if nonce:
         payload["nonce"] = nonce
 
-    if "email" in scopes and user.email:
-        payload["email"] = user.email
+    # Aggiungi i claim in base agli scope richiesti
+    for scope in scopes:
+        if scope in SCOPE_CLAIMS_MAP:
+            for claim in SCOPE_CLAIMS_MAP[scope]:
+                if hasattr(user, claim):
+                    payload[claim] = getattr(user, claim)
 
-    if "profile" in scopes and user.full_name:
-        payload["name"] = user.full_name
-
-    # Utilizziamo il nostro encoder personalizzato per gestire gli oggetti datetime
     json_payload = json.dumps(payload, cls=DateTimeEncoder)
-
     return jwt.encode(json.loads(json_payload), private_pem, algorithm=ALGORITHM)
 
 
-@cached(user_cache)
+# @cached(user_cache)
 def get_user(username: str) -> Optional[UserInDB]:
     user_key = datastore_client.key("User", username)
     user_data = datastore_client.get(user_key)
@@ -346,7 +371,9 @@ def get_user(username: str) -> Optional[UserInDB]:
     # Ensure username is explicitly included in the user data
     user_data["username"] = username
 
-    return UserInDB(**user_data)
+    additional_claims = {k: v for k, v in user_data.items() if k in SUPPORTED_CLAIMS or k in User.__fields__ or k == "hashed_password"}
+
+    return UserInDB(**user_data, additional_claims=additional_claims)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     try:
@@ -364,7 +391,7 @@ def authenticate_user(username: str, password: str) -> Optional[UserInDB]:
             "reason": "User not found"
         })
         return None
-    if not verify_password(password, user.hashed_password):
+    if not user.verify_password(password):
         log_audit_event("user_authentication_failed", username, {
             "reason": "Invalid password"
         })
@@ -716,11 +743,6 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
 @app.get("/userinfo", tags=["authentication"])
 @limiter.limit("200/minute")
 async def read_users_me(request: Request, current_user: User = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
-    """
-    Get information about the currently authenticated user.
-
-    This endpoint requires a valid access token and returns user information based on the granted scopes.
-    """
     try:
         payload = jwt.decode(token, public_key, algorithms=[ALGORITHM])
         scopes = set(payload.get("scope", "").split())
@@ -729,13 +751,16 @@ async def read_users_me(request: Request, current_user: User = Depends(get_curre
 
     user_info = {"sub": current_user.username}
 
-    if "email" in scopes:
-        user_info["email"] = current_user.email
+    for scope in scopes:
+        if scope in SCOPE_CLAIMS_MAP:
+            for claim in SCOPE_CLAIMS_MAP[scope]:
+                if claim in current_user.additional_claims:
+                    user_info[claim] = current_user.additional_claims[claim]
+                elif hasattr(current_user, claim):
+                    user_info[claim] = getattr(current_user, claim)
 
-    if "profile" in scopes:
-        if current_user.full_name:
-            user_info["name"] = current_user.full_name
-        # Aggiungi altri campi del profilo se disponibili
+    # # Aggiungi tutti i claims aggiuntivi
+    # user_info.update(current_user.additional_claims)
 
     return user_info
 
@@ -759,7 +784,7 @@ async def openid_configuration(request: Request):
         "id_token_signing_alg_values_supported": [ALGORITHM],
         "scopes_supported": list(SUPPORTED_SCOPES),
         "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
-        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce", "name", "email"]
+        "claims_supported": ["sub", "iss", "aud", "exp", "iat", "auth_time", "nonce"] + list(SUPPORTED_CLAIMS)
     }
 
 @app.get("/jwks.json", tags=["authentication"])
@@ -870,6 +895,68 @@ async def authorize(
     # Reindirizza al client con i parametri appropriati
     redirect_uri = f"{redirect_uri}?{urlencode(response_params)}"
     return RedirectResponse(redirect_uri)
+
+
+@app.post("/users", response_model=User, tags=["users"])
+@limiter.limit("10/minute")
+async def create_user(user: DynamicUserCreate, request: Request):
+    """
+    Create a new user with dynamic fields based on supported claims.
+
+    - **username**: The user's unique username (3-20 characters)
+    - **email**: The user's email address
+    - **password**: The user's password (minimum 8 characters)
+    - **additional_claims**: Additional user claims based on supported scopes
+
+    Returns the created user object (excluding the password).
+    """
+    # Check if username already exists
+    existing_user = get_user(user.username)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+
+    # Check if email already exists
+    query = datastore_client.query(kind="User")
+    query.add_filter("email", "=", user.email)
+    if list(query.fetch(limit=1)):
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    # Hash the password
+    hashed_password = get_password_hash(user.password)
+
+    # Create new user entity
+    new_user = datastore.Entity(key=datastore_client.key("User", user.username))
+    new_user.update({
+        "username": user.username,
+        "email": user.email,
+        "hashed_password": hashed_password,
+        "disabled": False
+    })
+
+    # Add additional claims
+    for claim, value in user.additional_claims.items():
+        new_user[claim] = value
+
+    # Save the new user
+    datastore_client.put(new_user)
+
+    # Clear the user cache for this username
+    user_cache.pop(user.username, None)
+
+    # Log the event
+    log_audit_event("user_created", user.username, {
+        "ip": request.client.host,
+        "user_agent": request.headers.get("User-Agent")
+    })
+
+    # Create a User object from the new_user entity
+    created_user = User(
+        username=new_user["username"],
+        email=new_user["email"],
+        additional_claims={k: v for k, v in new_user.items() if k not in ["username", "email", "hashed_password", "disabled"]}
+    )
+
+    return created_user
 
 @app.get("/login", response_class=HTMLResponse)
 @limiter.limit("200/minute")
