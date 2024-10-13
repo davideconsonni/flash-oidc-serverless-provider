@@ -37,6 +37,7 @@ PRIVATE_KEY_BLOB_NAME = os.environ.get("PRIVATE_KEY_BLOB_NAME", "rsa_private_key
 PUBLIC_KEY_BLOB_NAME = os.environ.get("PUBLIC_KEY_BLOB_NAME", "rsa_public_key.pem")
 
 ALGORITHM = os.environ.get("ALGORITHM", "RS256")
+LIMITER_DEFAULT_LIMIT = os.environ.get("LIMITER_DEFAULT_LIMIT", "10000/second")
 
 ENABLE_ADMIN_ENDPOINTS = os.environ.get("ENABLE_ADMIN_ENDPOINTS", str("False")).lower() in ("yes", "y", "true", "1", "ok")
 
@@ -536,7 +537,7 @@ def admin_endpoint(func):
     return wrapper
 
 @app.post("/token", response_model=TokenResponse, tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def login_for_access_token(
         request: Request,
         grant_type: str = Form(...),
@@ -639,7 +640,7 @@ async def login_for_access_token(
 
 
 @app.post("/register", tags=["admin"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 @admin_endpoint
 async def register_client(request: Request, client_data: ClientRegistrationData = Body(...)):
     """
@@ -670,7 +671,7 @@ async def register_client(request: Request, client_data: ClientRegistrationData 
 
 
 @app.post("/refresh", tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def refresh_token(request: Request, refresh_token_data: RefreshToken = Body(...)):
     """
     Use a refresh token to get a new access token.
@@ -771,7 +772,7 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
 
 
 @app.get("/userinfo", tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def read_users_me(request: Request, current_user: User = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, public_key, algorithms=[ALGORITHM])
@@ -795,7 +796,7 @@ async def read_users_me(request: Request, current_user: User = Depends(get_curre
     return user_info
 
 @app.get("/.well-known/openid-configuration", tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def openid_configuration(request: Request):
     """
     Retrieve the OpenID Connect configuration information.
@@ -818,7 +819,7 @@ async def openid_configuration(request: Request):
     }
 
 @app.get("/jwks.json", tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def jwks(request: Request):
     """
     Retrieve the JSON Web Key Set (JWKS) used for token verification.
@@ -836,7 +837,7 @@ async def jwks(request: Request):
     return {"keys": [jwk]}
 
 @app.get("/authorize", tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def authorize(
         request: Request,
         response_type: str,
@@ -933,7 +934,7 @@ async def authorize(
 
 
 @app.post("/users", response_model=User, tags=["admin"])
-@limiter.limit("10/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 @admin_endpoint
 async def create_user(user: DynamicUserCreate, request: Request):
     """
@@ -995,7 +996,7 @@ async def create_user(user: DynamicUserCreate, request: Request):
     return created_user
 
 @app.get("/login", response_class=HTMLResponse)
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def login(request: Request):
     """
     Display the login page.
@@ -1005,7 +1006,7 @@ async def login(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "next": request.query_params.get("next")})
 
 @app.post("/login", tags=["authentication"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def login_submit(
         request: Request,
         username: str = Form(...),
@@ -1042,7 +1043,7 @@ async def login_submit(
     return RedirectResponse(f"/?auth_token={auth_token}", status_code=303)
 
 @app.get("/health", tags=["monitoring"])
-@limiter.limit("200/minute")
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
 async def health_check(request: Request):
     """
     Perform a health check on the service.
