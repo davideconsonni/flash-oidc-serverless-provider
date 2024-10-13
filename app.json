@@ -1,0 +1,57 @@
+{
+  "name": "OpenID Connect Provider",
+  "description": "A serverless OpenID Connect Provider",
+  "repository": "https://github.com/davideconsonni/flash-oidc-serverless-provider",
+  "keywords": ["fastapi", "python", "openid", "oauth", "authentication"],
+  "env": {
+    "ALGORITHM": {
+      "description": "The algorithm used for JWT encoding/decoding",
+      "value": "RS256"
+    },
+    "ACCESS_TOKEN_EXPIRE_MINUTES": {
+      "description": "Expiration time for access tokens in minutes",
+      "value": "60"
+    },
+    "REFRESH_TOKEN_EXPIRE_DAYS": {
+      "description": "Expiration time for refresh tokens in days",
+      "value": "1"
+    },
+    "ID_TOKEN_EXPIRE_MINUTES": {
+      "description": "Expiration time for ID tokens in minutes",
+      "value": "60"
+    },
+    "ISSUER": {
+      "description": "The issuer identifier for this OpenID provider",
+      "value": "https://your-domain.com"
+    },
+    "BUCKET_NAME": {
+      "description": "The name of the Google Cloud Storage bucket for storing keys",
+      "required": true
+    },
+    "PRIVATE_KEY_BLOB_NAME": {
+      "description": "The name of the blob for storing the private key",
+      "value": "rsa_private_key.pem"
+    },
+    "PUBLIC_KEY_BLOB_NAME": {
+      "description": "The name of the blob for storing the public key",
+      "value": "rsa_public_key.pem"
+    },
+    "NAMESPACE": {
+      "description": "Custom namespace for OpenID users in Datastore",
+      "value": "openid_users"
+    },
+    "ENABLE_ADMIN_ENDPOINTS": {
+      "description": "Enable administrative endpoints (true/false)",
+      "value": "false"
+    },
+    "SCOPE_CLAIMS_MAP": {
+      "description": "JSON mapping of scopes to claims",
+      "value": "{\"profile\": [\"disabled\", \"full_name\"], \"email\": [\"email\"], \"address\": [\"street_address\", \"locality\", \"region\", \"postal_code\", \"country\"]}"
+    }
+  },
+  "options": {
+    "allow-unauthenticated": true,
+    "memory": "512Mi",
+    "cpu": "1"
+  }
+}
