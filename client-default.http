@@ -1,6 +1,5 @@
 ### Environment variables
-#@baseUrl = http://localhost:8080
-@baseUrl = https://flash-oidc-serverless-provider-961806258058.europe-west1.run.app/
+@baseUrl = http://localhost:8080
 @username = aaa
 @password = aaa
 @client_id = your_client_id
