@@ -2,6 +2,10 @@
 
 **Flash OIDC Serverless Provider** is a lightweight and scalable OpenID Connect (OIDC) Provider built with a serverless architecture, leveraging Google Cloud's Datastore for efficient data management. This project is designed to offer a secure and flexible identity provider solution, ideal for modern cloud-native applications.
 
+## Run on Google Cloud:
+
+[![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run/?git_repo=https://github.com/davideconsonni/flash-oidc-serverless-provider.git)
+
 ## Key Features:
 - **Secure User Authentication**: Robust system for authenticating users with username and password credentials.
 - **Standards-Compliant Token Handling**: Generates and manages access, refresh, and ID tokens in compliance with OAuth 2.0 and OpenID Connect standards.
@@ -30,9 +34,5 @@
 
 ## Contributions:
 Feel free to contribute by opening issues or submitting pull requests. We welcome feedback and suggestions to improve this project.
-
-## Run on Google Cloud:
-
-[![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run/?git_repo=https://github.com/davideconsonni/flash-oidc-serverless-provider.git)
 
 
