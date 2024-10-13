@@ -108,16 +108,17 @@ ph = PasswordHasher()
 oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl="token",
     scopes={
-        "openid": "OpenID scope",
-        "profile": "Access to user profile information",
-        "email": "Access to user email"
+        scope: (
+            "OpenID scope" if scope == "openid" else
+            f"Access to {', '.join(SCOPE_CLAIMS_MAP.get(scope, [scope]))} information"
+        ) for scope in SUPPORTED_SCOPES
     }
 )
 
 # Creiamo una cache con un tempo di vita (TTL) di 1 ora e una dimensione massima di 100 elementi
-keys_cache = TTLCache(maxsize=100, ttl=3600)
-user_cache = TTLCache(maxsize=1000, ttl=300)  # Cache per 1000 utenti, TTL di 5 minuti
-client_cache = TTLCache(maxsize=100, ttl=3600)  # Cache per 100 client, TTL di 1 ora
+keys_cache = TTLCache(maxsize=100, ttl=1) # 3600
+user_cache = TTLCache(maxsize=1000, ttl=1)  # 300 Cache per 1000 utenti, TTL di 5 minuti
+client_cache = TTLCache(maxsize=100, ttl=1)  # 3600 Cache per 100 client, TTL di 1 ora
 
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
@@ -362,7 +363,7 @@ def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional
     return jwt.encode(json.loads(json_payload), private_pem, algorithm=ALGORITHM)
 
 
-# @cached(user_cache)
+@cached(user_cache)
 def get_user(username: str) -> Optional[UserInDB]:
     user_key = datastore_client.key("User", username)
     user_data = datastore_client.get(user_key)
@@ -462,7 +463,7 @@ def store_client(client_data: ClientRegistrationData):
     client_cache.pop(client_data.client_id, None)
 
 
-# @cached(client_cache)
+@cached(client_cache)
 def get_client(client_id: str):
     client_key = datastore_client.key("Client", client_id)
     return datastore_client.get(client_key)
