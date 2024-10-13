@@ -5,6 +5,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from datetime import timedelta
+from functools import wraps
 from typing import Dict, Any, Optional, List, Set
 from urllib.parse import urlencode
 
@@ -36,6 +37,9 @@ PRIVATE_KEY_BLOB_NAME = os.environ.get("PRIVATE_KEY_BLOB_NAME", "rsa_private_key
 PUBLIC_KEY_BLOB_NAME = os.environ.get("PUBLIC_KEY_BLOB_NAME", "rsa_public_key.pem")
 
 ALGORITHM = os.environ.get("ALGORITHM", "RS256")
+
+ENABLE_ADMIN_ENDPOINTS = os.environ.get("ENABLE_ADMIN_ENDPOINTS", str("False")).lower() in ("yes", "y", "true", "1", "ok")
+
 # Configurazione degli scope e dei claim
 DEFAULT_SCOPES = {"openid", "profile"}
 SCOPE_CLAIMS_MAP = json.loads(os.environ.get("SCOPE_CLAIMS_MAP", '{"profile": ["disabled", "full_name"], "email": ["email"], "address": ["street_address", "locality", "region", "postal_code", "country"]}'))
@@ -526,6 +530,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
 
 # --- Endpoints ---
+def admin_endpoint(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        if not ENABLE_ADMIN_ENDPOINTS:
+            raise HTTPException(status_code=404, detail="Endpoint not found")
+        return await func(*args, **kwargs)
+    return wrapper
 
 @app.post("/token", response_model=TokenResponse, tags=["authentication"])
 @limiter.limit("200/minute")
@@ -630,8 +641,9 @@ async def login_for_access_token(
     }
 
 
-@app.post("/register")
+@app.post("/register", tags=["admin"])
 @limiter.limit("200/minute")
+@admin_endpoint
 async def register_client(request: Request, client_data: ClientRegistrationData = Body(...)):
     """
     Register a new OAuth2 client.
@@ -923,8 +935,9 @@ async def authorize(
     return RedirectResponse(redirect_uri)
 
 
-@app.post("/users", response_model=User, tags=["users"])
+@app.post("/users", response_model=User, tags=["admin"])
 @limiter.limit("10/minute")
+@admin_endpoint
 async def create_user(user: DynamicUserCreate, request: Request):
     """
     Create a new user with dynamic fields based on supported claims.
@@ -994,7 +1007,7 @@ async def login(request: Request):
     """
     return templates.TemplateResponse("login.html", {"request": request, "next": request.query_params.get("next")})
 
-@app.post("/login")
+@app.post("/login", tags=["authentication"])
 @limiter.limit("200/minute")
 async def login_submit(
         request: Request,
