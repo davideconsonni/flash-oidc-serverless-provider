@@ -25,5 +25,5 @@ Feel free to contribute by opening issues or submitting pull requests. We welcom
 ## Run on Google Cloud:
 
 [![Run on Google Cloud](https://deploy.cloud.run/button.svg)](https://deploy.cloud.run/?git_repo=https://github.com/davideconsonni/flash-oidc-serverless-provider.git)
----
-gcloud datastore indexes create --kind=AuthToken
+
+
