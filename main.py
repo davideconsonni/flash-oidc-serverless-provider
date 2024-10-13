@@ -101,10 +101,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configurazione logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Password hashing
 ph = PasswordHasher()
 
@@ -123,6 +119,9 @@ oauth2_scheme = OAuth2PasswordBearer(
 keys_cache = TTLCache(maxsize=100, ttl=1) # 3600
 user_cache = TTLCache(maxsize=1000, ttl=1)  # 300 Cache per 1000 utenti, TTL di 5 minuti
 client_cache = TTLCache(maxsize=100, ttl=1)  # 3600 Cache per 100 client, TTL di 1 ora
+
+# Configurazione logging
+logging.basicConfig(level=logging.INFO)
 
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
@@ -210,14 +209,12 @@ class AuthorizationRequest(BaseModel):
     scope: str = Field(..., description="The requested scopes, space-separated")
     state: str = Field(..., description="A value used to maintain state between the request and callback")
 
-
 class TokenResponse(BaseModel):
     access_token: str = Field(..., description="The access token for API requests")
     token_type: str = Field(..., description="The type of token, typically 'bearer'")
     refresh_token: str = Field(..., description="Token used to obtain a new access token")
     expires_in: int = Field(..., description="Number of seconds until the access token expires")
     id_token: str = Field(..., description="OpenID Connect ID Token")
-
 
 class DynamicUserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=20)
