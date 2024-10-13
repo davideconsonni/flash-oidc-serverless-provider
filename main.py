@@ -146,9 +146,9 @@ class TokenResponse(BaseModel):
 
 # --- Fine Modelli Pydantic ---
 
-# Funzioni di utilità
 
-# Funzione per salvare le chiavi nel Datastore
+# --- Funzioni di utilità ---
+
 def save_keys_to_storage(private_key, public_key):
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -372,8 +372,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
         raise credentials_exception
     return user
 
+# --- Fine Funzioni di utilità ---
 
-# Endpoints
+
+# --- Endpoints ---
+
 @app.post("/token", response_model=TokenResponse, tags=["authentication"])
 @limiter.limit("200/minute")
 async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
@@ -805,6 +808,8 @@ async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExc
         content={"detail": "Rate limit exceeded. Please try again later."}
     )
 
+# --- Fine Funzioni di utilità ---
+
 # ---  Inizializzazione delle chiavi ---
 private_key, public_key = get_keys_from_storage()
 
@@ -823,7 +828,7 @@ pem = public_key.public_bytes(
 )
 
 kid = base64.urlsafe_b64encode(pem).decode('utf-8')[:8]
-# --- Inizializzazione delle chiavi ---
+# --- Fine Inizializzazione delle chiavi ---
 
 if __name__ == "__main__":
     import uvicorn
