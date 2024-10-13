@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 python-jose[cryptography]
-passlib[bcrypt]
 python-multipart
 google-cloud-datastore
 pydantic[email]
@@ -10,4 +9,5 @@ itsdangerous
 apscheduler
 google-cloud-storage
 slowapi
+argon2-cffi
 

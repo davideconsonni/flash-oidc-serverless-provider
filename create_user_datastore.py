@@ -1,8 +1,7 @@
 from google.cloud import datastore
-from passlib.hash import bcrypt
+from argon2 import PasswordHasher
 import os
 import logging
-logging.getLogger('passlib').setLevel(logging.ERROR)
 
 # Ensure you have set the GOOGLE_APPLICATION_CREDENTIALS environment variable
 # to the path of your service account key JSON file
@@ -12,6 +11,9 @@ NAMESPACE = "openid_users"
 
 # Initialize Datastore client with the custom namespace
 datastore_client = datastore.Client(namespace=NAMESPACE)
+
+# Initialize Argon2 PasswordHasher
+ph = PasswordHasher()
 
 def create_user(username, email, password, full_name=None):
     user_key = datastore_client.key("User", username)
@@ -26,7 +28,7 @@ def create_user(username, email, password, full_name=None):
     user_entity.update({
         "username": username,  # Make sure this is included
         "email": email,
-        "hashed_password": bcrypt.hash(password),
+        "hashed_password": ph.hash(password),
         "full_name": full_name,
         "disabled": False
     })

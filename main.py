@@ -21,7 +21,7 @@ from fastapi.security.utils import get_authorization_scheme_param
 from google.cloud import datastore
 from google.cloud import storage
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+from argon2 import PasswordHasher
 from pydantic import BaseModel, constr, EmailStr, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -92,7 +92,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+ph = PasswordHasher()
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(
@@ -270,10 +270,13 @@ def get_user(username: str) -> Optional[UserInDB]:
     return UserInDB(**user_data)
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return ph.verify(hashed_password, plain_password)
+    except:
+        return False
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    return ph.hash(password)
 
 def authenticate_user(username: str, password: str) -> Optional[UserInDB]:
     user = get_user(username)
