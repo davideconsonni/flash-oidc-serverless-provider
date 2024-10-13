@@ -1,0 +1,118 @@
+### Environment variables
+@baseUrl = http://localhost:8080
+@username = aaa
+@password = aaa
+@client_id = your_client_id
+@client_secret = your_client_secret
+
+
+### Login page (GET request to load the login form)
+GET {{baseUrl}}/login
+
+
+### Submit login credentials
+# @name login
+# @no-redirect
+POST {{baseUrl}}/login
+Content-Type: application/x-www-form-urlencoded
+
+username={{username}}&password={{password}}
+
+> {%
+    var locationHeader = response.headers.valueOf("Location");
+
+    function getQueryParam(url, param) {
+        var queryString = url.split('?')[1];
+        if (queryString) {
+            var params = queryString.split('&');
+            for (var i = 0; i < params.length; i++) {
+                var pair = params[i].split('=');
+                if (pair[0] === param) {
+                    return decodeURIComponent(pair[1]);
+                }
+            }
+        }
+        return null;
+    }
+
+    var authToken = getQueryParam(locationHeader, "auth_token");
+    if (authToken) {
+        client.global.set("auth_token", authToken);
+        client.log("Auth token set: " + authToken);
+    } else {
+        client.log("Auth token not found in the response");
+    }
+%}
+
+
+### Use the auth_token to initiate authorization
+# @name authorize
+# @no-redirect
+GET {{baseUrl}}/authorize
+    ?response_type=code
+    &client_id={{client_id}}
+    &redirect_uri=https://example.com/callback
+    &scope=openid profile email
+    &state=random_state_string
+    &auth_token={{auth_token}}
+
+> {%
+    var locationHeader = response.headers.valueOf("Location");
+
+    function getQueryParam(url, param) {
+        var queryString = url.split('?')[1];
+        if (queryString) {
+            var params = queryString.split('&');
+            for (var i = 0; i < params.length; i++) {
+                var pair = params[i].split('=');
+                if (pair[0] === param) {
+                    return decodeURIComponent(pair[1]);
+                }
+            }
+        }
+        return null;
+    }
+
+    var authToken = getQueryParam(locationHeader, "code");
+    if (authToken) {
+        client.global.set("code", authToken);
+        client.log("Auth code set: " + authToken);
+    } else {
+        client.log("Auth code not found in the response");
+    }
+%}
+
+
+### Exchange authorization code for tokens
+# @name token
+POST {{baseUrl}}/token
+Content-Type: application/x-www-form-urlencoded
+Authorization: Basic eW91cl9jbGllbnRfaWQ6eW91cl9jbGllbnRfc2VjcmV0
+
+grant_type=authorization_code
+    &code={{code}}
+    &redirect_uri=https://example.com/callback
+
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+%}
+
+
+### Use access token to get user info
+GET {{baseUrl}}/userinfo
+Authorization: Bearer {{access_token}}
+
+
+### Refresh the token
+POST {{baseUrl}}/refresh
+Content-Type: application/json
+
+{
+    "refresh_token": "{{refresh_token}}"
+}
+
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+%}
