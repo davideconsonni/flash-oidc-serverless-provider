@@ -10,4 +10,5 @@ apscheduler
 google-cloud-storage
 slowapi
 argon2-cffi
+python-json-logger
 

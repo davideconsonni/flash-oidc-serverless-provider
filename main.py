@@ -26,6 +26,11 @@ from pydantic import BaseModel, constr, EmailStr, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.templating import Jinja2Templates
+import logging
+import json
+import os
+from pythonjsonlogger import jsonlogger
+from datetime import datetime
 
 # Configurazione
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "busysummer44-flash-oidc-serverless-provider")
@@ -103,6 +108,54 @@ oauth2_scheme = OAuth2PasswordBearer(
         "email": "Access to user email"
     }
 )
+
+class CustomJsonFormatter(jsonlogger.JsonFormatter):
+    def add_fields(self, log_record, record, message_dict):
+        super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
+        log_record['severity'] = record.levelname
+        log_record['module'] = record.module
+
+def setup_logging():
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Rimuovi tutti gli handler esistenti
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Aggiungi un nuovo handler
+    handler = logging.StreamHandler()
+
+    if os.environ.get('GOOGLE_CLOUD_PROJECT'):
+        # Formattatore JSON per GCP
+        from pythonjsonlogger import jsonlogger
+        formatter = jsonlogger.JsonFormatter('%(timestamp)s %(severity)s %(module)s %(message)s')
+    else:
+        # Formattatore leggibile per console locale
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
+
+logger = setup_logging()
+
+def log_audit_event(event_type: str, user: str, details: dict):
+    timestamp = datetime.utcnow().isoformat()
+    audit_entry = {
+        "timestamp": timestamp,
+        "event_type": event_type,
+        "user": user,
+        "details": details
+    }
+
+    if os.environ.get('GOOGLE_CLOUD_PROJECT'):
+        # Log strutturato per GCP
+        logger.info(audit_entry)
+    else:
+        # Log leggibile per console locale
+        logger.info(f"AUDIT: {json.dumps(audit_entry, indent=2)}")
 
 # --- Modelli Pydantic per la validazione ---
 class User(BaseModel):
@@ -444,6 +497,10 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
         scopes = set(form_data.scopes) if form_data.scopes else {"openid"}
 
     if not user:
+        log_audit_event("login_failed", form_data.username, {
+            "client_id": client_id,
+            "grant_type": form_data.grant_type
+        })
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -454,6 +511,14 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
     valid_scopes = scopes.intersection(SUPPORTED_SCOPES)
     if "openid" not in valid_scopes:
         valid_scopes.add("openid")
+
+    if user:
+        log_audit_event("token_issued", user.username, {
+            "client_id": client_id,
+            "grant_type": form_data.grant_type,
+            "scopes": list(valid_scopes)
+        })
+
 
     # Genera i token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -493,6 +558,10 @@ async def register_client(request: Request, client_data: ClientRegistrationData 
     # Store the client credentials securely
     store_client(client_data)
 
+    log_audit_event("client_registered", "system", {
+        "client_id": client_data.client_id
+    })
+
     return {"client_id": client_data.client_id}
 
 
@@ -523,8 +592,8 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
 
         # Verifica nel Datastore
         query = datastore_client.query(kind="RefreshToken")
-        query.add_filter("token", "=", refresh_token_data.refresh_token)
-        query.add_filter("username", "=", username)
+        query.add_filter(filter=("token", "=", refresh_token_data.refresh_token))
+        query.add_filter(filter=("username", "=", username))
         results = list(query.fetch(limit=1))
 
         if not results:
@@ -546,6 +615,9 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
         # Calculate token expiration times in seconds
         access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
+        log_audit_event("token_refreshed", username, {
+            "username": username
+        })
         return {
             "access_token": new_access_token,
             "refresh_token": new_refresh_token,
@@ -799,6 +871,10 @@ async def root():
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    log_audit_event("unhandled_exception", "system", {
+        "error": str(exc),
+        "path": request.url.path
+    })
     return Response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content="An internal server error occurred."
