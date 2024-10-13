@@ -24,7 +24,7 @@ from fastapi.security.utils import get_authorization_scheme_param
 from google.cloud import datastore
 from google.cloud import storage
 from jose import JWTError, jwt
-from pydantic import BaseModel, EmailStr, Field, validator, constr
+from pydantic import BaseModel, EmailStr, Field, field_validator, constr
 from pythonjsonlogger import jsonlogger
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -219,7 +219,8 @@ class DynamicUserCreate(BaseModel):
     password: str = Field(..., min_length=8)
     additional_claims: Dict[str, Any] = Field(default_factory=dict)
 
-    @validator('additional_claims')
+    @field_validator('additional_claims')
+    @classmethod
     def validate_additional_claims(cls, v):
         for claim in v.keys():
             if claim not in SUPPORTED_CLAIMS:
