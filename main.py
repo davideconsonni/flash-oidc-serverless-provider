@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBasic
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer
 from fastapi.security.utils import get_authorization_scheme_param
 from google.cloud import datastore
 from google.cloud import storage
@@ -29,9 +29,6 @@ from pythonjsonlogger import jsonlogger
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.templating import Jinja2Templates
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-import base64
 
 # Configurazione
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "busysummer44-flash-oidc-serverless-provider")
@@ -363,8 +360,14 @@ def get_password_hash(password: str) -> str:
 def authenticate_user(username: str, password: str) -> Optional[UserInDB]:
     user = get_user(username)
     if not user:
+        log_audit_event("user_authentication_failed", username, {
+            "reason": "User not found"
+        })
         return None
     if not verify_password(password, user.hashed_password):
+        log_audit_event("user_authentication_failed", username, {
+            "reason": "Invalid password"
+        })
         return None
     return user
 
@@ -436,14 +439,28 @@ def get_client(client_id: str):
 
 def verify_client(client_id: str, client_secret: str) -> bool:
     if not client_id or not client_secret:
+        log_audit_event("client_verification_failed", "system", {
+            "reason": "Missing client_id or client_secret"
+        })
         return False
 
     client_data = get_client(client_id)
 
     if not client_data:
+        log_audit_event("client_verification_failed", "system", {
+            "reason": "Client not found",
+            "client_id": client_id
+        })
         return False
 
-    return verify_password(client_secret, client_data["hashed_client_secret"])
+    if not verify_password(client_secret, client_data["hashed_client_secret"]):
+        log_audit_event("client_verification_failed", "system", {
+            "reason": "Invalid client secret",
+            "client_id": client_id
+        })
+        return False
+
+    return True
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(
@@ -587,7 +604,9 @@ async def register_client(request: Request, client_data: ClientRegistrationData 
     store_client(client_data)
 
     log_audit_event("client_registered", "system", {
-        "client_id": client_data.client_id
+        "client_id": client_data.client_id,
+        "ip": request.client.host,
+        "user_agent": request.headers.get("User-Agent")
     })
 
     return {"client_id": client_data.client_id}
@@ -652,6 +671,10 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
 
         # Elimina il vecchio refresh token
         datastore_client.delete(results[0].key)
+        log_audit_event("refresh_token_invalidated", username, {
+            "client_id": client_id,
+            "ip": request.client.host
+        })
 
         # Calculate token expiration times in seconds
         access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
@@ -822,6 +845,12 @@ async def authorize(
         "expires": datetime.utcnow() + timedelta(minutes=10)
     })
     datastore_client.put(auth_code_entity)
+    log_audit_event("authorization_code_generated", user_id, {
+        "client_id": client_id,
+        "scope": " ".join(valid_scopes),
+        "response_type": response_type,
+        "ip": request.client.host
+    })
 
     # Prepara la risposta in base al response_type
     response_params = {"state": state}
@@ -871,13 +900,20 @@ async def login_submit(
     """
     user = authenticate_user(username, password)
     if not user:
+        log_audit_event("login_failed", username, {
+            "ip": request.client.host,
+            "user_agent": request.headers.get("User-Agent")
+        })
         return templates.TemplateResponse(
             "login.html",
             {"request": request, "error": "Incorrect username or password", "next": next}
         )
 
     auth_token = create_auth_token(user.username)
-
+    log_audit_event("login_successful", user.username, {
+        "ip": request.client.host,
+        "user_agent": request.headers.get("User-Agent")
+    })
     if next:
         return RedirectResponse(f"{next}&auth_token={auth_token}", status_code=303)
     return RedirectResponse(f"/?auth_token={auth_token}", status_code=303)
@@ -930,7 +966,9 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     log_audit_event("unhandled_exception", "system", {
         "error": str(exc),
-        "path": request.url.path
+        "path": request.url.path,
+        "method": request.method,
+        "ip": request.client.host
     })
     return Response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
