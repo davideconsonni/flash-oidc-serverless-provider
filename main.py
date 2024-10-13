@@ -1,12 +1,15 @@
-import logging
 import base64
+import json
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
+from datetime import timedelta
 from typing import Optional
 from urllib.parse import urlencode
 
+from argon2 import PasswordHasher
+from cachetools import TTLCache, cached
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Body, Form
@@ -21,16 +24,14 @@ from fastapi.security.utils import get_authorization_scheme_param
 from google.cloud import datastore
 from google.cloud import storage
 from jose import JWTError, jwt
-from argon2 import PasswordHasher
 from pydantic import BaseModel, constr, EmailStr, Field
+from pythonjsonlogger import jsonlogger
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.templating import Jinja2Templates
-import logging
-import json
-import os
-from pythonjsonlogger import jsonlogger
-from datetime import datetime
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+import base64
 
 # Configurazione
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "busysummer44-flash-oidc-serverless-provider")
@@ -108,6 +109,11 @@ oauth2_scheme = OAuth2PasswordBearer(
         "email": "Access to user email"
     }
 )
+
+# Creiamo una cache con un tempo di vita (TTL) di 1 ora e una dimensione massima di 100 elementi
+keys_cache = TTLCache(maxsize=100, ttl=3600)
+user_cache = TTLCache(maxsize=1000, ttl=300)  # Cache per 1000 utenti, TTL di 5 minuti
+client_cache = TTLCache(maxsize=100, ttl=3600)  # Cache per 100 client, TTL di 1 ora
 
 class CustomJsonFormatter(jsonlogger.JsonFormatter):
     def add_fields(self, log_record, record, message_dict):
@@ -223,6 +229,7 @@ def save_keys_to_storage(private_key, public_key):
     public_blob.upload_from_string(public_pem)
 
 
+@cached(keys_cache)
 def get_keys_from_storage():
     try:
         # Recupera la chiave privata
@@ -249,7 +256,7 @@ def get_keys_from_storage():
 def create_auth_token(user_id: str) -> str:
     auth_token = secrets.token_urlsafe(32)
     auth_entity = datastore.Entity(key=datastore_client.key("AuthToken"))
-    expiration_time = datetime.utcnow() + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
+    expiration_time = datetime.now(timezone.utc) + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
     auth_entity.update({
         "token": auth_token,
         "user_id": user_id,
@@ -259,6 +266,22 @@ def create_auth_token(user_id: str) -> str:
     datastore_client.put(auth_entity)
     return auth_token
 
+def verify_authorization_code(code: str, client_id: str, redirect_uri: str) -> Optional[dict]:
+    query = datastore_client.query(kind="AuthorizationCode")
+    query.add_filter("code", "=", code)
+    query.add_filter("client_id", "=", client_id)
+    query.add_filter("redirect_uri", "=", redirect_uri)
+    results = list(query.fetch(limit=1))
+
+    if not results or results[0]["expires"] < datetime.now(timezone.utc):
+        return None
+
+    auth_code = results[0]
+
+    # Elimina il codice di autorizzazione utilizzato
+    datastore_client.delete(results[0].key)
+
+    return auth_code
 
 def verify_auth_token(auth_token: str) -> Optional[str]:
     query = datastore_client.query(kind="AuthToken")
@@ -270,15 +293,25 @@ def verify_auth_token(auth_token: str) -> Optional[str]:
 
     token_entity = results[0]
 
-    if token_entity["expires"] <= datetime.utcnow():
+    # Assicurati che il datetime memorizzato sia UTC e offset-aware
+    stored_expiry = token_entity["expires"].replace(tzinfo=timezone.utc)
+    current_time = datetime.now(timezone.utc)
+
+    if stored_expiry <= current_time:
         # Token is expired, delete it and return None
         datastore_client.delete(token_entity.key)
         return None
 
     return token_entity["user_id"]
 
-def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional[str] = None, auth_time: Optional[float] = None) -> str:
-    now = datetime.utcnow()
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super(DateTimeEncoder, self).default(obj)
+
+def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional[str] = None) -> str:
+    now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=ID_TOKEN_EXPIRE_MINUTES)
 
     payload = {
@@ -287,7 +320,7 @@ def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional
         "aud": client_id,
         "exp": expires,
         "iat": now,
-        "auth_time": auth_time or now.timestamp(),
+        "auth_time": now,
     }
 
     if nonce:
@@ -296,20 +329,16 @@ def create_id_token(user: UserInDB, client_id: str, scopes: set, nonce: Optional
     if "email" in scopes and user.email:
         payload["email"] = user.email
 
-    if "profile" in scopes:
-        if user.full_name:
-            payload["name"] = user.full_name
-        # Aggiungi altri campi del profilo se disponibili
+    if "profile" in scopes and user.full_name:
+        payload["name"] = user.full_name
 
-    # Converti la chiave privata in formato PEM
-    pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
+    # Utilizziamo il nostro encoder personalizzato per gestire gli oggetti datetime
+    json_payload = json.dumps(payload, cls=DateTimeEncoder)
 
-    return jwt.encode(payload, pem, algorithm=ALGORITHM)
+    return jwt.encode(json.loads(json_payload), private_pem, algorithm=ALGORITHM)
 
+
+@cached(user_cache)
 def get_user(username: str) -> Optional[UserInDB]:
     user_key = datastore_client.key("User", username)
     user_data = datastore_client.get(user_key)
@@ -357,7 +386,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, pem, algorithm=ALGORITHM)
     return encoded_jwt
 
-def create_refresh_token(username: str) -> str:
+def create_refresh_token(username: str, scopes: set, client_id: str) -> str:
     expires = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
 
     # Converti la chiave privata in formato PEM
@@ -368,7 +397,7 @@ def create_refresh_token(username: str) -> str:
     )
 
     refresh_token = jwt.encode(
-        {"sub": username, "type": "refresh", "exp": expires},
+        {"sub": username, "type": "refresh", "exp": expires, "scopes": list(scopes), "client_id": client_id},
         pem,
         algorithm=ALGORITHM
     )
@@ -378,14 +407,15 @@ def create_refresh_token(username: str) -> str:
     entity.update({
         "token": refresh_token,
         "username": username,
-        "expires": expires
+        "expires": expires,
+        "scopes": list(scopes),
+        "client_id": client_id
     })
     datastore_client.put(entity)
 
     return refresh_token
 
 def store_client(client_data: ClientRegistrationData):
-    # Hash the client_secret before storing
     hashed_client_secret = get_password_hash(client_data.client_secret)
 
     entity = datastore.Entity(key=datastore_client.key("Client", client_data.client_id))
@@ -395,18 +425,24 @@ def store_client(client_data: ClientRegistrationData):
     })
     datastore_client.put(entity)
 
+    # Invalida la cache per questo client_id
+    client_cache.pop(client_data.client_id, None)
+
+
+@cached(client_cache)
+def get_client(client_id: str):
+    client_key = datastore_client.key("Client", client_id)
+    return datastore_client.get(client_key)
+
 def verify_client(client_id: str, client_secret: str) -> bool:
     if not client_id or not client_secret:
         return False
 
-    # Fetch client details from Datastore
-    client_key = datastore_client.key("Client", client_id)
-    client_data = datastore_client.get(client_key)
+    client_data = get_client(client_id)
 
     if not client_data:
         return False
 
-    # Verify the provided client_secret
     return verify_password(client_secret, client_data["hashed_client_secret"])
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
@@ -435,13 +471,18 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
 @app.post("/token", response_model=TokenResponse, tags=["authentication"])
 @limiter.limit("200/minute")
-async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
-    """
-    OAuth2 compatible token login, get an access token for future requests.
-    """
+async def login_for_access_token(
+        request: Request,
+        grant_type: str = Form(...),
+        client_id: Optional[str] = Form(None),
+        client_secret: Optional[str] = Form(None),
+        code: Optional[str] = Form(None),
+        redirect_uri: Optional[str] = Form(None),
+        username: Optional[str] = Form(None),
+        password: Optional[str] = Form(None),
+        scope: Optional[str] = Form(None)
+):
     # Gestione dell'Authorization header per le credenziali del client
-    client_id = None
-    client_secret = None
     auth_header = request.headers.get("Authorization")
     if auth_header:
         scheme, param = get_authorization_scheme_param(auth_header)
@@ -455,10 +496,6 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
                     detail="Invalid authentication credentials",
                     headers={"WWW-Authenticate": "Basic"},
                 )
-    else:
-        # Se non c'è l'Authorization header, usa i dati del form
-        client_id = form_data.client_id
-        client_secret = form_data.client_secret
 
     # Verifica le credenziali del client
     if not verify_client(client_id, client_secret):
@@ -467,44 +504,41 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
             detail="Invalid client credentials",
         )
 
-    # Controlla se questa è una concessione del codice di autorizzazione
-    if form_data.grant_type == "authorization_code":
+    if grant_type == "authorization_code":
+        if not code or not redirect_uri:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing code or redirect_uri for authorization_code grant type",
+            )
         # Valida il codice di autorizzazione
-        query = datastore_client.query(kind="AuthorizationCode")
-        query.add_filter("code", "=", form_data.code)
-        query.add_filter("client_id", "=", client_id)
-        results = list(query.fetch(limit=1))
-
-        if not results or results[0]["expires"] < datetime.utcnow():
+        auth_code = verify_authorization_code(code, client_id, redirect_uri)
+        if not auth_code:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or expired authorization code",
             )
-
-        auth_code = results[0]
         user = get_user(auth_code["user_id"])
-        nonce = auth_code.get("nonce")
-        auth_time = auth_code.get("auth_time")
         scopes = set(auth_code.get("scope", "openid").split())
-
-        # Elimina il codice di autorizzazione utilizzato
-        datastore_client.delete(results[0].key)
-    else:
-        # Fallback alla concessione della password (come implementato prima)
-        user = authenticate_user(form_data.username, form_data.password)
+        nonce = auth_code.get("nonce")
+    elif grant_type == "password":
+        if not username or not password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing username or password for password grant type",
+            )
+        user = authenticate_user(username, password)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        scopes = set(scope.split() if scope else ["openid"])
         nonce = None
-        auth_time = datetime.utcnow().timestamp()
-        scopes = set(form_data.scopes) if form_data.scopes else {"openid"}
-
-    if not user:
-        log_audit_event("login_failed", form_data.username, {
-            "client_id": client_id,
-            "grant_type": form_data.grant_type
-        })
+    else:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported grant_type",
         )
 
     # Filtra gli scope validi
@@ -512,32 +546,26 @@ async def login_for_access_token(request: Request, form_data: OAuth2PasswordRequ
     if "openid" not in valid_scopes:
         valid_scopes.add("openid")
 
-    if user:
-        log_audit_event("token_issued", user.username, {
-            "client_id": client_id,
-            "grant_type": form_data.grant_type,
-            "scopes": list(valid_scopes)
-        })
-
-
     # Genera i token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username, "scope": " ".join(valid_scopes)},
         expires_delta=access_token_expires
     )
+    refresh_token = create_refresh_token(user.username, valid_scopes, client_id)
+    id_token = create_id_token(user, client_id, valid_scopes, nonce)
 
-    refresh_token = create_refresh_token(user.username)
-    access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
-
-    # Genera l'ID Token
-    id_token = create_id_token(user, client_id, valid_scopes, nonce, auth_time)
+    log_audit_event("token_issued", user.username, {
+        "client_id": client_id,
+        "grant_type": grant_type,
+        "scopes": list(valid_scopes)
+    })
 
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "expires_in": access_token_expires_in_seconds,
+        "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "id_token": id_token,
     }
 
@@ -602,12 +630,25 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
                 detail="Refresh token not found",
             )
 
+        refresh_token_entity = results[0]
+
+        # Recupera gli scope e il client_id originali
+        original_scopes = set(refresh_token_entity.get("scopes", ["openid"]))
+        client_id = refresh_token_entity.get("client_id")
+
+        if not client_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Client ID not found in refresh token",
+            )
+
         # Genera nuovi token
         access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         new_access_token = create_access_token(
-            data={"sub": username}, expires_delta=access_token_expires
+            data={"sub": username, "scope": " ".join(original_scopes)},
+            expires_delta=access_token_expires
         )
-        new_refresh_token = create_refresh_token(username)
+        new_refresh_token = create_refresh_token(username, original_scopes, client_id)
 
         # Elimina il vecchio refresh token
         datastore_client.delete(results[0].key)
@@ -615,14 +656,30 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
         # Calculate token expiration times in seconds
         access_token_expires_in_seconds = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
+        # Recupera l'utente per generare l'id_token
+        user = get_user(username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        # Genera un nuovo id_token
+        id_token = create_id_token(user, client_id, original_scopes)
+
         log_audit_event("token_refreshed", username, {
-            "username": username
+            "username": username,
+            "scopes": list(original_scopes),
+            "client_id": client_id
         })
+
         return {
             "access_token": new_access_token,
             "refresh_token": new_refresh_token,
             "token_type": "bearer",
-            "expires": access_token_expires_in_seconds,
+            "expires_in": access_token_expires_in_seconds,
+            "id_token": id_token,
+            "scope": " ".join(original_scopes)
         }
 
     except JWTError:
@@ -900,15 +957,20 @@ if not private_key or not public_key:
     public_key = private_key.public_key()
     save_keys_to_storage(private_key, public_key)
 
-# Il resto del codice rimane invariato
-pem = public_key.public_bytes(
+# Converti la chiave privata in formato PEM
+private_pem = private_key.private_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption()
+)
+
+# Converti la chiave pubblica in formato PEM
+public_pem = public_key.public_bytes(
     encoding=serialization.Encoding.PEM,
     format=serialization.PublicFormat.SubjectPublicKeyInfo
 )
 
-kid = base64.urlsafe_b64encode(pem).decode('utf-8')[:8]
-# --- Fine Inizializzazione delle chiavi ---
-
+kid = base64.urlsafe_b64encode(public_pem).decode('utf-8')[:8]
 if __name__ == "__main__":
     import uvicorn
 

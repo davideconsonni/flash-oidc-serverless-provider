@@ -1,0 +1,64 @@
+### Environment variables
+@baseUrl = http://localhost:8080
+@username = aaa
+@password = aaa
+@client_id = your_client_id
+@client_secret = your_client_secret
+
+
+### Login page (GET request to load the login form)
+GET {{baseUrl}}/login
+
+
+### Submit login credentials
+# @name login
+POST {{baseUrl}}/login
+Content-Type: application/x-www-form-urlencoded
+
+username={{username}}&password={{password}}
+
+
+### Use the auth_token to initiate authorization
+# @name authorize
+GET {{baseUrl}}/authorize
+    ?response_type=code
+    &client_id={{client_id}}
+    &redirect_uri=https://example.com/callback
+    &scope=openid profile email
+    &state=random_state_string
+    &auth_token=yR16ulGXWPQR8NkGcTaF51NBr-hpdIbhPcr0T7VUuF0
+
+
+### Exchange authorization code for tokens
+# @name token
+POST {{baseUrl}}/token
+Content-Type: application/x-www-form-urlencoded
+Authorization: Basic eW91cl9jbGllbnRfaWQ6eW91cl9jbGllbnRfc2VjcmV0
+
+grant_type=authorization_code
+    &code=TyJ39ttFyuQN4mCTTIgmE_CBpVEwTF1z2IwC5-ScqQo
+    &redirect_uri=https://example.com/callback
+
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+%}
+
+
+### Use access token to get user info
+GET {{baseUrl}}/userinfo
+Authorization: Bearer {{access_token}}
+
+
+### Refresh the token
+POST {{baseUrl}}/refresh
+Content-Type: application/json
+
+{
+    "refresh_token": "{{refresh_token}}"
+}
+
+> {%
+    client.global.set("access_token", response.body.access_token);
+    client.global.set("refresh_token", response.body.refresh_token);
+%}

@@ -29,6 +29,7 @@ Content-Type: application/json
 %}
 
 
+
 ### Login to get tokens (with all scopes)
 POST {{baseUrl}}/token
 Content-Type: application/x-www-form-urlencoded
@@ -71,3 +72,9 @@ Content-Type: application/x-www-form-urlencoded
 
 grant_type=authorization_code&code={auth_code}&client_id={{client_id}}&client_secret={{client_secret}}&redirect_uri=https://example.com/callback
 
+
+###
+GET {{baseUrl}}/authorize
+Content-Type: application/x-www-form-urlencoded
+
+response_type=code&client_id=your_client_id&redirect_uri=https://example.com/callback&scope=openid%20profile%20email&state=random_state_string&auth_token=LiYdm0pOSkeJCtvoikVkV3uQ5gtnTr9HOXilEBWc7B0
