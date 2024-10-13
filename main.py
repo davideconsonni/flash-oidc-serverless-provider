@@ -173,6 +173,7 @@ def log_audit_event(event_type: str, user: str, details: dict):
         logger.info(f"AUDIT: {json.dumps(audit_entry, indent=2)}")
 
 # --- Modelli Pydantic per la validazione ---
+
 class User(BaseModel):
     username: constr(min_length=3, max_length=20) = Field(..., description="User's unique username")
     email: EmailStr = Field(..., description="User's email address")
@@ -528,6 +529,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
 
 
 # --- Endpoints ---
+
 def admin_endpoint(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
@@ -768,7 +770,6 @@ async def refresh_token(request: Request, refresh_token_data: RefreshToken = Bod
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token",
         )
-
 
 
 @app.get("/userinfo", tags=["authentication"])
@@ -1106,9 +1107,10 @@ async def custom_rate_limit_exceeded_handler(request: Request, exc: RateLimitExc
         content={"detail": "Rate limit exceeded. Please try again later."}
     )
 
-# --- Fine Funzioni di utilità ---
+# --- Fine Endpoins ---
 
 # ---  Inizializzazione delle chiavi ---
+
 private_key, public_key = get_keys_from_storage()
 
 if not private_key or not public_key:
@@ -1133,6 +1135,10 @@ public_pem = public_key.public_bytes(
 )
 
 kid = base64.urlsafe_b64encode(public_pem).decode('utf-8')[:8]
+
+# --- Fine Inizializzazione Chiavi ---
+
+
 if __name__ == "__main__":
     import uvicorn
 
