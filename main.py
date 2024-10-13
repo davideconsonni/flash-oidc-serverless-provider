@@ -5,7 +5,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from datetime import timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Set
 from urllib.parse import urlencode
 
 from argon2 import PasswordHasher
@@ -196,6 +196,7 @@ class RefreshToken(BaseModel):
 class ClientRegistrationData(BaseModel):
     client_id: str = Field(..., description="The client's unique identifier")
     client_secret: str = Field(..., description="The client's secret")
+    allowed_scopes: List[str] = Field(..., description="List of allowed scopes for this client")
 
 class AuthorizationRequest(BaseModel):
     response_type: str = Field(..., description="The desired response type ('code', 'id_token', or 'id_token token')")
@@ -453,6 +454,7 @@ def store_client(client_data: ClientRegistrationData):
     entity.update({
         "client_id": client_data.client_id,
         "hashed_client_secret": hashed_client_secret,
+        "allowed_scopes": client_data.allowed_scopes
     })
     datastore_client.put(entity)
 
@@ -460,12 +462,12 @@ def store_client(client_data: ClientRegistrationData):
     client_cache.pop(client_data.client_id, None)
 
 
-@cached(client_cache)
+# @cached(client_cache)
 def get_client(client_id: str):
     client_key = datastore_client.key("Client", client_id)
     return datastore_client.get(client_key)
 
-def verify_client(client_id: str, client_secret: str) -> bool:
+def verify_client(client_id: str, client_secret: str, requested_scopes: Set[str]) -> bool:
     if not client_id or not client_secret:
         log_audit_event("client_verification_failed", "system", {
             "reason": "Missing client_id or client_secret"
@@ -485,6 +487,16 @@ def verify_client(client_id: str, client_secret: str) -> bool:
         log_audit_event("client_verification_failed", "system", {
             "reason": "Invalid client secret",
             "client_id": client_id
+        })
+        return False
+
+    allowed_scopes = set(client_data.get("allowed_scopes", []))
+    if not requested_scopes.issubset(allowed_scopes):
+        log_audit_event("client_verification_failed", "system", {
+            "reason": "Requested scopes not allowed",
+            "client_id": client_id,
+            "requested_scopes": list(requested_scopes),
+            "allowed_scopes": list(allowed_scopes)
         })
         return False
 
@@ -542,11 +554,13 @@ async def login_for_access_token(
                     headers={"WWW-Authenticate": "Basic"},
                 )
 
-    # Verifica le credenziali del client
-    if not verify_client(client_id, client_secret):
+    requested_scopes = set(scope.split() if scope else ["openid"])
+
+    # Verifica le credenziali del client e gli scope richiesti
+    if not verify_client(client_id, client_secret, requested_scopes):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid client credentials",
+            detail="Invalid client credentials or requested scopes",
         )
 
     if grant_type == "authorization_code":
@@ -623,21 +637,26 @@ async def register_client(request: Request, client_data: ClientRegistrationData 
 
     - **client_id**: The client's unique identifier
     - **client_secret**: The client's secret
+    - **allowed_scopes**: List of allowed scopes for this client
 
     Returns the registered client_id.
     """
-    # La validazione dei dati è già gestita da Pydantic grazie al modello 'ClientRegistrationData'
+    # Verifica che gli scope richiesti siano validi
+    invalid_scopes = set(client_data.allowed_scopes) - SUPPORTED_SCOPES
+    if invalid_scopes:
+        raise HTTPException(status_code=400, detail=f"Invalid scopes: {', '.join(invalid_scopes)}")
 
     # Store the client credentials securely
     store_client(client_data)
 
     log_audit_event("client_registered", "system", {
         "client_id": client_data.client_id,
+        "allowed_scopes": client_data.allowed_scopes,
         "ip": request.client.host,
         "user_agent": request.headers.get("User-Agent")
     })
 
-    return {"client_id": client_data.client_id}
+    return {"client_id": client_data.client_id, "allowed_scopes": client_data.allowed_scopes}
 
 
 @app.post("/refresh", tags=["authentication"])
@@ -835,10 +854,15 @@ async def authorize(
     if response_type not in ["code", "id_token", "id_token token"]:
         raise HTTPException(status_code=400, detail="Invalid response_type")
 
-    # Verifica client_id
+    # Verifica client_id e scope
     client = datastore_client.get(datastore_client.key("Client", client_id))
     if not client:
         raise HTTPException(status_code=400, detail="Invalid client_id")
+
+    requested_scopes = set(scope.split())
+    allowed_scopes = set(client.get("allowed_scopes", []))
+    if not requested_scopes.issubset(allowed_scopes):
+        raise HTTPException(status_code=400, detail="Requested scopes not allowed for this client")
 
     if not auth_token:
         return RedirectResponse(f"/login?{urlencode(dict(request.query_params))}")
