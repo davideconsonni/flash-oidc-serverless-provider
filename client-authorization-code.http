@@ -104,6 +104,23 @@ GET {{baseUrl}}/userinfo
 Authorization: Bearer {{access_token}}
 
 
+### Token Introspection
+POST http://localhost:8080/introspect
+Content-Type: application/x-www-form-urlencoded
+Authorization: Basic eW91cl9jbGllbnRfaWQ6eW91cl9jbGllbnRfc2VjcmV0
+
+token={{access_token}}&client_id=your_client_id&client_secret=your_client_secret
+
+> {%
+    if (response.body.active) {
+        client.log("Token is active");
+        client.log("Token expires at: " + response.body.exp);
+    } else {
+        client.log("Token is not active");
+    }
+%}
+
+
 ### Refresh the token
 POST {{baseUrl}}/refresh
 Content-Type: application/json

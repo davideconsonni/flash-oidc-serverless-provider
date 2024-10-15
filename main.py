@@ -810,6 +810,7 @@ async def openid_configuration(request: Request):
         "authorization_endpoint": f"{base_url}/authorize",
         "token_endpoint": f"{base_url}/token",
         "userinfo_endpoint": f"{base_url}/userinfo",
+        "introspection_endpoint": f"{base_url}/introspect",
         "jwks_uri": f"{base_url}/jwks.json",
         "response_types_supported": ["code", "id_token", "id_token token"],
         "subject_types_supported": ["public"],
@@ -836,6 +837,74 @@ async def jwks(request: Request):
         "e": base64.urlsafe_b64encode(public_key.public_numbers().e.to_bytes((public_key.public_numbers().e.bit_length() + 7) // 8, byteorder='big')).decode('utf-8').rstrip('='),
     }
     return {"keys": [jwk]}
+
+
+@app.post("/introspect", tags=["authentication"])
+@limiter.limit(LIMITER_DEFAULT_LIMIT)
+async def introspect_token(
+        request: Request,
+        token: str = Form(...),
+        token_type_hint: Optional[str] = Form(None),
+        client_id: str = Form(...),
+        client_secret: str = Form(...),
+):
+    """
+    Introspect a token.
+
+    This endpoint allows clients to query the authorization server to determine the state of an
+    access token or refresh token and to determine meta-information about the token.
+    """
+    # Verify client credentials
+    if not verify_client(client_id, client_secret, set()):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid client credentials",
+        )
+
+    try:
+        # Decode the token without verifying to get the 'typ' claim
+        unverified_payload = jwt.decode(token, key="dummy_key", options={"verify_signature": False})
+        token_type = unverified_payload.get("typ", "access_token")
+
+        # Now decode and verify the token
+        payload = jwt.decode(token, public_key, algorithms=[ALGORITHM])
+
+        # Check if token is expired
+        if datetime.fromtimestamp(payload['exp']) < datetime.utcnow():
+            return {"active": False}
+
+        # For refresh tokens, check if they exist in the database
+        if token_type == "refresh_token":
+            query = datastore_client.query(kind="RefreshToken")
+            query.add_filter("token", "=", token)
+            if not list(query.fetch(limit=1)):
+                return {"active": False}
+
+        # Token is valid
+        response = {
+            "active": True,
+            "scope": payload.get("scope", ""),
+            "client_id": payload.get("aud"),
+            "username": payload.get("sub"),
+            "token_type": token_type,
+            "exp": payload["exp"],
+            "iat": payload.get("iat"),
+            "nbf": payload.get("nbf"),
+            "sub": payload["sub"],
+            "aud": payload.get("aud"),
+            "iss": payload.get("iss"),
+            "jti": payload.get("jti"),
+        }
+
+        # Remove None values
+        return {k: v for k, v in response.items() if v is not None}
+
+    except JWTError:
+        return {"active": False}
+
+    except Exception as e:
+        logger.error(f"Error during token introspection: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid token")
 
 @app.get("/authorize", tags=["authentication"])
 @limiter.limit(LIMITER_DEFAULT_LIMIT)
@@ -1012,7 +1081,7 @@ async def login_submit(
         request: Request,
         username: str = Form(...),
         password: str = Form(...),
-        next: str = Form(None)
+        redirect_uri: str = Form(None)
 ):
     """
     Process the login form submission.
@@ -1031,7 +1100,7 @@ async def login_submit(
         })
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "Incorrect username or password", "next": next}
+            {"request": request, "error": "Incorrect username or password", "redirect_uri": redirect_uri}
         )
 
     auth_token = create_auth_token(user.username)
@@ -1039,8 +1108,8 @@ async def login_submit(
         "ip": request.client.host,
         "user_agent": request.headers.get("User-Agent")
     })
-    if next:
-        return RedirectResponse(f"{next}&auth_token={auth_token}", status_code=303)
+    if redirect_uri:
+        return RedirectResponse(f"{redirect_uri}?auth_token={auth_token}", status_code=303)
     return RedirectResponse(f"/?auth_token={auth_token}", status_code=303)
 
 @app.get("/health", tags=["monitoring"])
