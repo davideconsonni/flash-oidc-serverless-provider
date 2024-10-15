@@ -53,7 +53,7 @@ SUPPORTED_SCOPES = DEFAULT_SCOPES.union(set(SCOPE_CLAIMS_MAP.keys()))
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", 60))
 REFRESH_TOKEN_EXPIRE_DAYS = int(os.environ.get("REFRESH_TOKEN_EXPIRE_DAYS", 1))
 ID_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ID_TOKEN_EXPIRE_MINUTES", 60))
-ISSUER = os.environ.get("ISSUER", "https://flash-oidc-serverless-provider.com")
+ISSUER = os.environ.get("ISSUER", "http://127.0.0.1:8080")
 BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8080")
 
 # Custom namespace for OpenID users
